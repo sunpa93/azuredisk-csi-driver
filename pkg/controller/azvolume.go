@@ -149,7 +149,20 @@ func (r *reconcileAzVolume) triggerDelete(ctx context.Context, volumeName string
 	if err := r.UpdateStatus(ctx, azVolume.Name, true, nil); err != nil {
 		return err
 	}
-	klog.Infof("successfully deleted volume (%s)and update status of AzVolume (%s)", azVolume.Spec.UnderlyingVolume, azVolume.Name)
+
+	// Delete all AzVolumeAttachment objects bound to the deleted AzVolume
+	if attachments, err := r.azVolumeClient.DiskV1alpha1().AzVolumeAttachments(r.namespace).List(ctx, metav1.ListOptions{}); err != nil {
+		for _, attachment := range attachments.Items {
+			if attachment.Spec.UnderlyingVolume == volumeName {
+				if err = r.azVolumeClient.DiskV1alpha1().AzVolumeAttachments(r.namespace).Delete(ctx, attachment.Name, metav1.DeleteOptions{}); err != nil {
+					klog.Errorf("failed to delete AzVolumeAttachment (%s): %v", attachment.Name, err)
+					return err
+				}
+			}
+		}
+	}
+
+	klog.Infof("successfully deleted volume (%s) and its attachments and update status of AzVolume (%s)", azVolume.Spec.UnderlyingVolume, azVolume.Name)
 	return nil
 }
 
