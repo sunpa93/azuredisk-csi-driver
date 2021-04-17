@@ -151,13 +151,19 @@ func (r *reconcileAzVolume) triggerDelete(ctx context.Context, volumeName string
 	}
 
 	// Delete all AzVolumeAttachment objects bound to the deleted AzVolume
-	if attachments, err := r.azVolumeClient.DiskV1alpha1().AzVolumeAttachments(r.namespace).List(ctx, metav1.ListOptions{}); err != nil {
-		for _, attachment := range attachments.Items {
-			if attachment.Spec.UnderlyingVolume == volumeName {
-				if err = r.azVolumeClient.DiskV1alpha1().AzVolumeAttachments(r.namespace).Delete(ctx, attachment.Name, metav1.DeleteOptions{}); err != nil {
-					klog.Errorf("failed to delete AzVolumeAttachment (%s): %v", attachment.Name, err)
-					return err
-				}
+	attachments, err := r.azVolumeClient.DiskV1alpha1().AzVolumeAttachments(r.namespace).List(ctx, metav1.ListOptions{})
+	if err != nil && !errors.IsNotFound(err) {
+		klog.Errorf("failed to get AzVolumeAttachments: %v", err)
+		return err
+	}
+
+	klog.V(5).Infof("number of attachments found: %d", len(attachments.Items))
+	for _, attachment := range attachments.Items {
+		klog.Infof("attachment name: %s, volume: %s", attachment.Name, attachment.Spec.UnderlyingVolume)
+		if attachment.Spec.UnderlyingVolume == volumeName {
+			if err = r.azVolumeClient.DiskV1alpha1().AzVolumeAttachments(r.namespace).Delete(ctx, attachment.Name, metav1.DeleteOptions{}); err != nil {
+				klog.Errorf("failed to delete AzVolumeAttachment (%s): %v", attachment.Name, err)
+				return err
 			}
 		}
 	}
