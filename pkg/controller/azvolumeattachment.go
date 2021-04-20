@@ -502,13 +502,15 @@ func (r *reconcileAzVolumeAttachment) DeleteFinalizerFromAzVolume(ctx context.Co
 	}
 
 	updated := azVolume.DeepCopy()
+	updatedFinalizers := []string{}
 
 	for _, finalizer := range updated.Finalizers {
 		if finalizer == AzVolumeAttachmentFinalizer {
 			continue
 		}
-		updated.Finalizers = append(updated.Finalizers, finalizer)
+		updatedFinalizers = append(updatedFinalizers, finalizer)
 	}
+	updated.Finalizers = updatedFinalizers
 
 	if err := r.client.Update(ctx, updated, &client.UpdateOptions{}); err != nil {
 		klog.Errorf("failed to delete finalizer (%s) from AzVolume(%s): %v", AzVolumeAttachmentFinalizer, updated.Name, err)
