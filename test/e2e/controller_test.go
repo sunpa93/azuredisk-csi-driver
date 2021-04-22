@@ -335,7 +335,7 @@ var _ = ginkgo.Describe("Controller", func() {
 			if len(nodes) < 1 {
 				ginkgo.Skip("need at least 1 nodes to verify the test case. Current node count is %d", len(nodes))
 			}
-			testAzAtt := testsuites.SetupTestAzVolumeAttachment(azDiskClient.DiskV1alpha1(), namespace, volName, nodes[0], []string{}, 0)
+			testAzAtt := testsuites.SetupTestAzVolumeAttachment(azDiskClient.DiskV1alpha1(), namespace, volName, nodes[0], 0)
 			_ = testAzAtt.Create()
 			defer testAzAtt.Cleanup()
 
@@ -347,7 +347,7 @@ var _ = ginkgo.Describe("Controller", func() {
 			err = azDiskClient.DiskV1alpha1().AzVolumes(namespace).Delete(context.Background(), volName, metav1.DeleteOptions{})
 			framework.ExpectNoError(err)
 
-			err = testAzAtt.WaitForDelete(time.Duration(5) * time.Minute)
+			err = testAzAtt.WaitForDelete(nodes[0], time.Duration(5)*time.Minute)
 			framework.ExpectNoError(err)
 		})
 	})

@@ -232,7 +232,11 @@ func (r *reconcileAzVolumeAttachment) SyncVolume(ctx context.Context, azVolume v
 		}
 	}
 
-	if desiredAttachmentCount > currentAttachmentCount {
+	// if the azVolume is marked deleted, do not create more azvolume attachment objects
+	now := metav1.Now()
+	azVolumeDeleted := azVolume.DeletionTimestamp.Before(&now)
+
+	if !azVolumeDeleted && desiredAttachmentCount > currentAttachmentCount {
 		klog.Infof("Create %d more replicas for volume (%s)", desiredAttachmentCount-currentAttachmentCount, azVolume.Spec.UnderlyingVolume)
 		if err = r.CreateReplicas(ctx, min(defaultMaxReplicaUpdateCount, desiredAttachmentCount-currentAttachmentCount), azVolume.Spec.UnderlyingVolume, useCache); err != nil {
 			klog.Errorf("failed to create %d replicas for volume (%s): %v", desiredAttachmentCount-currentAttachmentCount, azVolume.Spec.UnderlyingVolume, err)

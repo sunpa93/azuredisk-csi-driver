@@ -168,7 +168,7 @@ func (r *reconcileAzVolume) triggerDelete(ctx context.Context, volumeName string
 			klog.Errorf("failed to delete AzVolumeAttachment (%s): %v", attachment.Name, err)
 			return err
 		}
-		klog.V(5).Infof("Set deletion timestamp for AzVolumeAttachment (%s)")
+		klog.V(5).Infof("Set deletion timestamp for AzVolumeAttachment (%s)", attachment.Name)
 	}
 
 	klog.Infof("successfully deleted volume (%s) and its attachments and update status of AzVolume (%s)", azVolume.Spec.UnderlyingVolume, azVolume.Name)
