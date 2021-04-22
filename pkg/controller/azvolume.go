@@ -21,6 +21,8 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/azuredisk-csi-driver/pkg/apis/azuredisk/v1alpha1"
@@ -151,7 +153,10 @@ func (r *reconcileAzVolume) triggerDelete(ctx context.Context, volumeName string
 	}
 
 	// Delete all AzVolumeAttachment objects bound to the deleted AzVolume
-	attachments, err := r.azVolumeClient.DiskV1alpha1().AzVolumeAttachments(r.namespace).List(ctx, metav1.ListOptions{})
+	volRequirement, _ := labels.NewRequirement(VolumeNameLabel, selection.Equals, []string{azVolume.Spec.UnderlyingVolume})
+	labelSelector := labels.NewSelector().Add(*volRequirement)
+
+	attachments, err := r.azVolumeClient.DiskV1alpha1().AzVolumeAttachments(r.namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector.String()})
 	if err != nil && !errors.IsNotFound(err) {
 		klog.Errorf("failed to get AzVolumeAttachments: %v", err)
 		return err
@@ -159,13 +164,11 @@ func (r *reconcileAzVolume) triggerDelete(ctx context.Context, volumeName string
 
 	klog.V(5).Infof("number of attachments found: %d", len(attachments.Items))
 	for _, attachment := range attachments.Items {
-		klog.Infof("attachment name: %s, volume: %s", attachment.Name, attachment.Spec.UnderlyingVolume)
-		if attachment.Spec.UnderlyingVolume == volumeName {
-			if err = r.azVolumeClient.DiskV1alpha1().AzVolumeAttachments(r.namespace).Delete(ctx, attachment.Name, metav1.DeleteOptions{}); err != nil {
-				klog.Errorf("failed to delete AzVolumeAttachment (%s): %v", attachment.Name, err)
-				return err
-			}
+		if err = r.azVolumeClient.DiskV1alpha1().AzVolumeAttachments(r.namespace).Delete(ctx, attachment.Name, metav1.DeleteOptions{}); err != nil {
+			klog.Errorf("failed to delete AzVolumeAttachment (%s): %v", attachment.Name, err)
+			return err
 		}
+		klog.V(5).Infof("Set deletion timestamp for AzVolumeAttachment (%s)")
 	}
 
 	klog.Infof("successfully deleted volume (%s) and its attachments and update status of AzVolume (%s)", azVolume.Spec.UnderlyingVolume, azVolume.Name)
