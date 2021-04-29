@@ -82,7 +82,7 @@ func (r *reconcileAzVolume) HandlePV(ctx context.Context, request reconcile.Requ
 	}
 
 	if azVolume.Status != nil {
-		if pv.Status.Phase == corev1.VolumeReleased && (azVolume.Status.Phase != v1alpha1.VolumeReleased || azVolume.Status.Phase != v1alpha1.VolumeAvailable) {
+		if pv.Status.Phase == corev1.VolumeReleased && azVolume.Status.Phase == v1alpha1.VolumeBound {
 			updated := azVolume.DeepCopy()
 			updated.Status.Phase = v1alpha1.VolumeReleased
 

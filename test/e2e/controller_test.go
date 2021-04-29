@@ -346,6 +346,8 @@ var _ = ginkgo.Describe("Controller", func() {
 
 			// failover to one of replicas
 			attachments, err := azDiskClient.DiskV1alpha1().AzVolumeAttachments(namespace).List(context.Background(), metav1.ListOptions{})
+			framework.ExpectNoError(err)
+
 			var replica *v1alpha1.AzVolumeAttachment
 			for _, attachment := range attachments.Items {
 				if attachment.Status != nil && attachment.Status.Role == v1alpha1.ReplicaRole {

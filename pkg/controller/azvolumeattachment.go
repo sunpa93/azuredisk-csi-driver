@@ -262,7 +262,7 @@ func (r *reconcileAzVolumeAttachment) SyncVolume(ctx context.Context, azVolume v
 			go func(ctx context.Context) {
 				// Sleep
 				time.Sleep(defaultTimeUntilDeletion)
-				r.CleanUpAzVolumeAttachment(ctx, azVolume.Name)
+				_ = r.CleanUpAzVolumeAttachment(ctx, azVolume.Name)
 			}(deletionCtx)
 		}
 		return nil
