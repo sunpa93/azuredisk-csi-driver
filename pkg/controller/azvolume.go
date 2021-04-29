@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -28,6 +29,9 @@ import (
 	"sigs.k8s.io/azuredisk-csi-driver/pkg/apis/azuredisk/v1alpha1"
 	azVolumeClientSet "sigs.k8s.io/azuredisk-csi-driver/pkg/apis/client/clientset/versioned"
 	"sigs.k8s.io/azuredisk-csi-driver/pkg/azureutils"
+
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/selection"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -49,6 +53,49 @@ type reconcileAzVolume struct {
 var _ reconcile.Reconciler = &reconcileAzVolume{}
 
 func (r *reconcileAzVolume) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
+	result, err := r.HandlePV(ctx, request)
+	if !result.Requeue && errors.IsNotFound(err) {
+		return r.HandleAzVolume(ctx, request)
+	}
+	return result, err
+}
+
+func (r *reconcileAzVolume) HandlePV(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
+	var pv corev1.PersistentVolume
+	if err := r.client.Get(ctx, request.NamespacedName, &pv); err != nil {
+		if errors.IsNotFound(err) {
+			return reconcile.Result{}, err
+		}
+		klog.Errorf("failed to get PV (%s): %v", request.Name, err)
+		return reconcile.Result{Requeue: true}, err
+	}
+
+	if pv.Spec.CSI == nil || pv.Spec.CSI.Driver != DriverName {
+		return reconcile.Result{}, nil
+	}
+
+	var azVolume v1alpha1.AzVolume
+	if err := r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: pv.Name}, &azVolume); err != nil {
+		// if underlying PV was found but AzVolume was not. Might be due to stale cache
+		klog.V(5).Infof("failed to get AzVolume (%s): %v", pv.Name, err)
+		return reconcile.Result{}, nil
+	}
+
+	if azVolume.Status != nil {
+		if pv.Status.Phase == corev1.VolumeReleased && (azVolume.Status.Phase != v1alpha1.VolumeReleased || azVolume.Status.Phase != v1alpha1.VolumeAvailable) {
+			updated := azVolume.DeepCopy()
+			updated.Status.Phase = v1alpha1.VolumeReleased
+
+			if err := r.client.Update(ctx, updated, &client.UpdateOptions{}); err != nil {
+				klog.Errorf("failed to update AzVolume (%s): %v", pv.Name, err)
+				return reconcile.Result{Requeue: true}, err
+			}
+		}
+	}
+	return reconcile.Result{}, nil
+}
+
+func (r *reconcileAzVolume) HandleAzVolume(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
 	var azVolume v1alpha1.AzVolume
 
 	err := r.client.Get(ctx, request.NamespacedName, &azVolume)
@@ -77,11 +124,15 @@ func (r *reconcileAzVolume) Reconcile(ctx context.Context, request reconcile.Req
 			//If delete failed, requeue request
 			return reconcile.Result{Requeue: true}, err
 		}
+	} else if azVolume.Status.Phase == v1alpha1.VolumeReleased {
+		klog.Infof("Volume released: Initiating AzVolumeAttachment Clean-up")
+		if err := r.CleanUpAzVolumeAttachment(ctx, azVolume.Name); err != nil {
+			return reconcile.Result{Requeue: true}, err
+		}
 	} else {
 		// azVolume update
 		if err := r.triggerUpdate(ctx, azVolume.Name); err != nil {
 			klog.Errorf("failed to update AzVolume (%s): %v", azVolume.Name, err)
-			return reconcile.Result{Requeue: true}, err
 		}
 	}
 
@@ -128,7 +179,7 @@ func (r *reconcileAzVolume) triggerCreate(ctx context.Context, volumeName string
 	}
 
 	// Update status of the object
-	if err := r.UpdateStatus(ctx, azVolume.Name, false, response); err != nil {
+	if err := r.UpdateStatus(ctx, azVolume.Name, v1alpha1.VolumeBound, false, response); err != nil {
 		return err
 	}
 	klog.Infof("successfully created volume (%s)and update status of AzVolume (%s)", azVolume.Spec.UnderlyingVolume, azVolume.Name)
@@ -166,7 +217,7 @@ func (r *reconcileAzVolume) triggerDelete(ctx context.Context, volumeName string
 	}
 
 	// Update status of the object
-	if err := r.UpdateStatus(ctx, azVolume.Name, true, nil); err != nil {
+	if err := r.UpdateStatus(ctx, azVolume.Name, azVolume.Status.Phase, true, nil); err != nil {
 		return err
 	}
 
@@ -174,7 +225,7 @@ func (r *reconcileAzVolume) triggerDelete(ctx context.Context, volumeName string
 	return nil
 }
 
-func (r *reconcileAzVolume) UpdateStatus(ctx context.Context, volumeName string, isDeleted bool, status *v1alpha1.AzVolumeStatusParams) error {
+func (r *reconcileAzVolume) UpdateStatus(ctx context.Context, volumeName string, phase v1alpha1.AzVolumePhase, isDeleted bool, status *v1alpha1.AzVolumeStatusParams) error {
 	var azVolume v1alpha1.AzVolume
 	if err := r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: volumeName}, &azVolume); err != nil {
 		klog.Errorf("failed to get AzVolume (%s): %v", volumeName, err)
@@ -206,6 +257,8 @@ func (r *reconcileAzVolume) UpdateStatus(ctx context.Context, volumeName string,
 		}
 	}
 
+	updated.Status.Phase = phase
+
 	if err := r.client.Status().Update(ctx, updated, &client.UpdateOptions{}); err != nil {
 		klog.Errorf("failed to update status of AzVolume (%s): %v", volumeName, err)
 		return err
@@ -225,6 +278,45 @@ func (r *reconcileAzVolume) createVolume(ctx context.Context, azVolume *v1alpha1
 func (r *reconcileAzVolume) deleteVolume(ctx context.Context, azVolume *v1alpha1.AzVolume) error {
 	err := r.cloudProvisioner.DeleteVolume(ctx, azVolume.Status.ResponseObject.VolumeID, azVolume.Spec.Secrets)
 	return err
+}
+
+func (r *reconcileAzVolume) CleanUpAzVolumeAttachment(ctx context.Context, azVolumeName string) error {
+	var azVolume v1alpha1.AzVolume
+	err := r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: azVolumeName}, &azVolume)
+	if err != nil {
+		klog.Errorf("failed to get AzVolume (%s): %v", azVolumeName, err)
+		return err
+	}
+
+	volRequirement, _ := labels.NewRequirement(VolumeNameLabel, selection.Equals, []string{azVolume.Spec.UnderlyingVolume})
+	labelSelector := labels.NewSelector().Add(*volRequirement)
+
+	attachments, err := r.azVolumeClient.DiskV1alpha1().AzVolumeAttachments(r.namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector.String()})
+	if err != nil && !errors.IsNotFound(err) {
+		klog.Errorf("failed to get AzVolumeAttachments: %v", err)
+		return err
+	}
+
+	for _, attachment := range attachments.Items {
+		if err = r.azVolumeClient.DiskV1alpha1().AzVolumeAttachments(r.namespace).Delete(ctx, attachment.Name, metav1.DeleteOptions{}); err != nil {
+			klog.Errorf("failed to delete AzVolumeAttachment (%s): %v", attachment.Name, err)
+			return err
+		}
+		klog.V(5).Infof("Set deletion timestamp for AzVolumeAttachment (%s)", attachment.Name)
+	}
+
+	var response *v1alpha1.AzVolumeStatusParams
+	if azVolume.Status == nil {
+		response = azVolume.Status.ResponseObject
+	}
+
+	if err := r.UpdateStatus(ctx, azVolumeName, v1alpha1.VolumeReleased, false, response); err != nil {
+		klog.Errorf("failed to update status of AzVolume (%s): %v", azVolumeName, err)
+		return err
+	}
+
+	klog.Infof("successfully deleted AzVolumeAttachments for AzVolume (%s)", azVolume.Name)
+	return nil
 }
 
 func NewAzVolumeController(mgr manager.Manager, azVolumeClient *azVolumeClientSet.Interface, namespace string, cloudProvisioner CloudProvisioner) error {
@@ -249,6 +341,14 @@ func NewAzVolumeController(mgr manager.Manager, azVolumeClient *azVolumeClientSe
 		klog.Errorf("Failed to watch AzVolume. Error: %v", err)
 		return err
 	}
+
+	// Watch for Update events on PV objects
+	err = c.Watch(&source.Kind{Type: &corev1.PersistentVolume{}}, &handler.EnqueueRequestForObject{})
+	if err != nil {
+		klog.Errorf("Failed to watch PV. Error: %v", err)
+		return err
+	}
+
 	klog.V(2).Info("Controller set-up successfull.")
 	return nil
 }
