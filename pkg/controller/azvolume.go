@@ -84,7 +84,7 @@ func (r *reconcileAzVolume) Reconcile(ctx context.Context, request reconcile.Req
 		if err := CleanUpAzVolumeAttachment(ctx, r.client, r.azVolumeClient, r.namespace, azVolume.Name); err != nil {
 			return reconcile.Result{Requeue: true}, err
 		}
-		if err := r.UpdateStatus(ctx, azVolume.Name, v1alpha1.VolumeAvailable, false); err != nil {
+		if err := r.UpdateStatus(ctx, azVolume.Name, v1alpha1.VolumeAvailable, false, azVolume.Status.ResponseObject); err != nil {
 			klog.Errorf("failed to update status of AzVolume (%s): %v", azVolume.Name, err)
 			return reconcile.Result{Requeue: true}, err
 		}
@@ -112,7 +112,7 @@ func (r *reconcileAzVolume) triggerUpdate(ctx context.Context, volumeName string
 	}
 
 	// Update status of the object
-	if err := r.UpdateStatus(ctx, azVolume.Name, false, response); err != nil {
+	if err := r.UpdateStatus(ctx, azVolume.Name, azVolume.Status.Phase, false, response); err != nil {
 		return err
 	}
 	klog.Infof("successfully updated volume (%s)and update status of AzVolume (%s)", azVolume.Spec.UnderlyingVolume, azVolume.Name)

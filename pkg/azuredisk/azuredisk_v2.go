@@ -294,7 +294,7 @@ func (d *DriverV2) StartControllersAndDieOnExit(ctx context.Context) {
 	}
 
 	klog.V(2).Info("Initializing PV controller")
-	err = controller.NewPVController(mgr, d.cloudProvisioner.GetDiskClientSetAddr(), d.objectNamespace)
+	err = controller.NewPVController(mgr, d.crdProvisioner.GetDiskClientSetAddr(), d.objectNamespace)
 	if err != nil {
 		klog.Errorf("Failed to initialize PVController. Error: %v. Exiting application...", err)
 		os.Exit(1)
