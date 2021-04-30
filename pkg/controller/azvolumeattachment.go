@@ -101,7 +101,7 @@ func (r *reconcileAzVolumeAttachment) Reconcile(ctx context.Context, request rec
 func (r *reconcileAzVolumeAttachment) HandleAzVolumeAttachmentEvent(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
 	var azVolumeAttachment v1alpha1.AzVolumeAttachment
 	err := r.client.Get(ctx, request.NamespacedName, &azVolumeAttachment)
-	// if object is not found, it means either 1) the object has been deleted. Log the deletion and do not requeue or 2) the object is not AzVolumeAttachment type. return NotFound error
+	// if object is not found, it means the object has been deleted. Log the deletion and do not requeue
 	if errors.IsNotFound(err) {
 		klog.Infof("AzVolumeAttachment (%s) has successfully been deleted.", request.Name)
 		r.volumeMapMutex.RLock()
@@ -262,7 +262,7 @@ func (r *reconcileAzVolumeAttachment) SyncVolume(ctx context.Context, azVolume v
 			go func(ctx context.Context) {
 				// Sleep
 				time.Sleep(defaultTimeUntilDeletion)
-				_ = r.CleanUpAzVolumeAttachment(ctx, azVolume.Name)
+				_ = CleanUpAzVolumeAttachment(ctx, r.client, r.azVolumeClient, r.namespace, azVolume.Name)
 			}(deletionCtx)
 		}
 		return nil
@@ -329,12 +329,6 @@ func (r *reconcileAzVolumeAttachment) ManageReplicas(ctx context.Context, underl
 }
 
 func (r *reconcileAzVolumeAttachment) CreateReplicas(ctx context.Context, numReplica int, underlyingVolume string, useCache bool) error {
-	nodes, err := r.GetNodesForReplica(ctx, numReplica, underlyingVolume, false, useCache)
-	if err != nil {
-		klog.Errorf("failed to get a list of nodes for replica attachment: %v", err)
-		return err
-	}
-
 	// if volume is scheduled for clean up, skip replica creation
 	r.cleanUpMapMutex.Lock()
 	_, cleanUpScheduled := r.cleanUpMap[underlyingVolume]
@@ -342,6 +336,12 @@ func (r *reconcileAzVolumeAttachment) CreateReplicas(ctx context.Context, numRep
 
 	if cleanUpScheduled {
 		return nil
+	}
+
+	nodes, err := r.GetNodesForReplica(ctx, numReplica, underlyingVolume, false, useCache)
+	if err != nil {
+		klog.Errorf("failed to get a list of nodes for replica attachment: %v", err)
+		return err
 	}
 
 	for _, node := range nodes {

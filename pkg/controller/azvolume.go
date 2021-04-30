@@ -30,9 +30,6 @@ import (
 	azVolumeClientSet "sigs.k8s.io/azuredisk-csi-driver/pkg/apis/client/clientset/versioned"
 	"sigs.k8s.io/azuredisk-csi-driver/pkg/azureutils"
 
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/selection"
-
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -53,49 +50,6 @@ type reconcileAzVolume struct {
 var _ reconcile.Reconciler = &reconcileAzVolume{}
 
 func (r *reconcileAzVolume) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
-	result, err := r.HandlePV(ctx, request)
-	if !result.Requeue && errors.IsNotFound(err) {
-		return r.HandleAzVolume(ctx, request)
-	}
-	return result, err
-}
-
-func (r *reconcileAzVolume) HandlePV(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
-	var pv corev1.PersistentVolume
-	if err := r.client.Get(ctx, request.NamespacedName, &pv); err != nil {
-		if errors.IsNotFound(err) {
-			return reconcile.Result{}, err
-		}
-		klog.Errorf("failed to get PV (%s): %v", request.Name, err)
-		return reconcile.Result{Requeue: true}, err
-	}
-
-	if pv.Spec.CSI == nil || pv.Spec.CSI.Driver != DriverName {
-		return reconcile.Result{}, nil
-	}
-
-	var azVolume v1alpha1.AzVolume
-	if err := r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: pv.Name}, &azVolume); err != nil {
-		// if underlying PV was found but AzVolume was not. Might be due to stale cache
-		klog.V(5).Infof("failed to get AzVolume (%s): %v", pv.Name, err)
-		return reconcile.Result{}, nil
-	}
-
-	if azVolume.Status != nil {
-		if pv.Status.Phase == corev1.VolumeReleased && azVolume.Status.Phase == v1alpha1.VolumeBound {
-			updated := azVolume.DeepCopy()
-			updated.Status.Phase = v1alpha1.VolumeReleased
-
-			if err := r.client.Update(ctx, updated, &client.UpdateOptions{}); err != nil {
-				klog.Errorf("failed to update AzVolume (%s): %v", pv.Name, err)
-				return reconcile.Result{Requeue: true}, err
-			}
-		}
-	}
-	return reconcile.Result{}, nil
-}
-
-func (r *reconcileAzVolume) HandleAzVolume(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
 	var azVolume v1alpha1.AzVolume
 
 	err := r.client.Get(ctx, request.NamespacedName, &azVolume)
@@ -124,9 +78,14 @@ func (r *reconcileAzVolume) HandleAzVolume(ctx context.Context, request reconcil
 			//If delete failed, requeue request
 			return reconcile.Result{Requeue: true}, err
 		}
+		// azVolume released, so clean up all attachments
 	} else if azVolume.Status.Phase == v1alpha1.VolumeReleased {
 		klog.Infof("Volume released: Initiating AzVolumeAttachment Clean-up")
-		if err := r.CleanUpAzVolumeAttachment(ctx, azVolume.Name); err != nil {
+		if err := CleanUpAzVolumeAttachment(ctx, r.client, r.azVolumeClient, r.namespace, azVolume.Name); err != nil {
+			return reconcile.Result{Requeue: true}, err
+		}
+		if err := r.UpdateStatus(ctx, azVolume.Name, v1alpha1.VolumeAvailable, false); err != nil {
+			klog.Errorf("failed to update status of AzVolume (%s): %v", azVolume.Name, err)
 			return reconcile.Result{Requeue: true}, err
 		}
 	} else {
