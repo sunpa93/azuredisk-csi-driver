@@ -200,9 +200,6 @@ func (r *reconcileAzVolumeAttachment) SyncAll(ctx context.Context) (bool, error)
 					NodeName:         nodeName,
 					RequestedRole:    v1alpha1.PrimaryRole,
 				},
-				Status: &v1alpha1.AzVolumeAttachmentStatus{
-					Role: v1alpha1.PrimaryRole,
-				},
 			}, &client.CreateOptions{})
 			if err != nil {
 				klog.Errorf("failed to create AzVolumeAttachment (%s) for volume (%s) and node (%s): %v", azureutils.GetAzVolumeAttachmentName(*volumeName, nodeName), *volumeName, nodeName, err)

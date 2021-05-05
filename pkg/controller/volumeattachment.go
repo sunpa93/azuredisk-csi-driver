@@ -123,7 +123,7 @@ func NewVolumeAttachmentController(ctx context.Context, mgr manager.Manager, azV
 	// Watch for CRUD events on VolumeAttachment objects
 	err = c.Watch(&source.Kind{Type: &storagev1.VolumeAttachment{}}, &handler.EnqueueRequestForObject{})
 	if err != nil {
-		klog.Errorf("failed to initialize watch for azvolumeattachment object: %v", err)
+		klog.Errorf("failed to initialize watch for volumeattachment object: %v", err)
 		return err
 	}
 
