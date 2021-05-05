@@ -275,7 +275,7 @@ func (d *DriverV2) StartControllersAndDieOnExit(ctx context.Context) {
 	// Setup a new controller to clean-up AzDriverNodes
 	// objects for the nodes which get deleted
 	klog.V(2).Info("Initializing AzDriverNode controller")
-	err = controller.InitializeAzDriverNodeController(mgr, d.crdProvisioner.GetDiskClientSetAddr(), d.objectNamespace)
+	err = controller.InitializeAzDriverNodeController(ctx, mgr, d.crdProvisioner.GetDiskClientSetAddr(), d.objectNamespace)
 	if err != nil {
 		klog.Errorf("Failed to initialize AzDriverNodeController. Error: %v. Exiting application...", err)
 		os.Exit(1)
@@ -288,7 +288,7 @@ func (d *DriverV2) StartControllersAndDieOnExit(ctx context.Context) {
 	}
 
 	klog.V(2).Info("Initializing AzVolume controller")
-	err = controller.NewAzVolumeController(mgr, d.crdProvisioner.GetDiskClientSetAddr(), d.objectNamespace, d.cloudProvisioner)
+	err = controller.NewAzVolumeController(ctx, mgr, d.crdProvisioner.GetDiskClientSetAddr(), d.objectNamespace, d.cloudProvisioner)
 	if err != nil {
 		klog.Errorf("Failed to initialize AzVolumeController. Error: %v. Exiting application...", err)
 		os.Exit(1)
@@ -298,6 +298,13 @@ func (d *DriverV2) StartControllersAndDieOnExit(ctx context.Context) {
 	err = controller.NewPVController(mgr, d.crdProvisioner.GetDiskClientSetAddr(), d.objectNamespace)
 	if err != nil {
 		klog.Errorf("Failed to initialize PVController. Error: %v. Exiting application...", err)
+		os.Exit(1)
+	}
+
+	klog.V(2).Info("Initializing VolumeAttachment controller")
+	err = controller.NewVolumeAttachmentController(ctx, mgr, d.crdProvisioner.GetDiskClientSetAddr(), d.objectNamespace)
+	if err != nil {
+		klog.Errorf("Failed to initialize VolumeAttachmentController. Error: %v. Exiting application...", err)
 		os.Exit(1)
 	}
 

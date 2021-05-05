@@ -26,6 +26,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -57,6 +58,7 @@ const (
 	// defaultMaxReplicaUpdateCount refers to the maximum number of creation or deletion of AzVolumeAttachment objects in a single ManageReplica call
 	defaultMaxReplicaUpdateCount = 1
 	defaultTimeUntilDeletion     = time.Duration(5) * time.Minute
+	maxRetry                     = 10
 )
 
 type Event int
@@ -167,28 +169,58 @@ func (r *reconcileAzVolumeAttachment) getRoleCount(ctx context.Context, azVolume
 	return roleCount
 }
 
-// ManageAttachmentsForVolume will be running on a separate channel
-func (r *reconcileAzVolumeAttachment) SyncAll(ctx context.Context) error {
+// ManageAttachmentsForVolume will be runing on a separate channel
+func (r *reconcileAzVolumeAttachment) SyncAll(ctx context.Context) (bool, error) {
 	r.syncMutex.Lock()
 	defer r.syncMutex.Unlock()
 
-	// Get all AzVolume
-	azVolumes, err := r.azVolumeClient.DiskV1alpha1().AzVolumes(r.namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		klog.Errorf("failed to list AzVolumes: %v", err)
-		return err
+	volumesToSync := []string{}
+	// Get all volumeAttachments
+	var volumeAttachments storagev1.VolumeAttachmentList
+	if err := r.client.List(ctx, &volumeAttachments, &client.ListOptions{}); err != nil {
+		return true, err
+	}
+
+	// Loop through volumeAttachments and create Primary AzVolumeAttachments in correspondence
+	for _, volumeAttachment := range volumeAttachments.Items {
+		if volumeAttachment.Spec.Attacher == azureutils.DriverName {
+			volumeName := volumeAttachment.Spec.Source.PersistentVolumeName
+			if volumeName == nil {
+				continue
+			}
+			volumesToSync = append(volumesToSync, *volumeName)
+
+			nodeName := volumeAttachment.Spec.NodeName
+			err := r.client.Create(ctx, &v1alpha1.AzVolumeAttachment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: azureutils.GetAzVolumeAttachmentName(*volumeName, nodeName),
+				},
+				Spec: v1alpha1.AzVolumeAttachmentSpec{
+					UnderlyingVolume: *volumeName,
+					NodeName:         nodeName,
+					RequestedRole:    v1alpha1.PrimaryRole,
+				},
+				Status: &v1alpha1.AzVolumeAttachmentStatus{
+					Role: v1alpha1.PrimaryRole,
+				},
+			}, &client.CreateOptions{})
+			if err != nil {
+				klog.Errorf("failed to create AzVolumeAttachment (%s) for volume (%s) and node (%s): %v", azureutils.GetAzVolumeAttachmentName(*volumeName, nodeName), *volumeName, nodeName, err)
+				return true, err
+			}
+		}
 	}
 
 	numWorkers := defaultNumSyncWorkers
-	if numWorkers > len(azVolumes.Items) {
-		numWorkers = len(azVolumes.Items)
+	if numWorkers > len(volumesToSync) {
+		numWorkers = len(volumesToSync)
 	}
 
 	type resultStruct struct {
 		err    error
 		volume string
 	}
-	results := make(chan resultStruct, len(azVolumes.Items))
+	results := make(chan resultStruct, len(volumesToSync))
 	workerControl := make(chan struct{}, numWorkers)
 	defer close(results)
 	defer close(workerControl)
@@ -196,34 +228,45 @@ func (r *reconcileAzVolumeAttachment) SyncAll(ctx context.Context) error {
 	// Sync all volumes and reset mutexMap in case some volumes had been deleted
 	r.mutexMapMutex.Lock()
 	r.mutexMap = make(map[string]*sync.Mutex)
-	for _, azVolume := range azVolumes.Items {
-		r.mutexMap[azVolume.Spec.UnderlyingVolume] = &sync.Mutex{}
+	for _, volume := range volumesToSync {
+		r.mutexMap[volume] = &sync.Mutex{}
 		workerControl <- struct{}{}
-		go func(azv v1alpha1.AzVolume) {
-			results <- resultStruct{err: r.SyncVolume(ctx, azv, SyncEvent, false, false), volume: azv.Name}
+		go func(vol string) {
+			results <- resultStruct{err: r.SyncVolume(ctx, vol, SyncEvent, false, false), volume: vol}
 			<-workerControl
-		}(azVolume)
+		}(volume)
 	}
 	r.mutexMapMutex.Unlock()
 
 	// Collect results
-	for range azVolumes.Items {
+	for range volumesToSync {
 		result := <-results
 		if result.err != nil {
-			klog.Errorf("failed in process of syncing AzVolume (%s): %v", result.volume, err)
+			klog.Errorf("failed in process of syncing AzVolume (%s): %v", result.volume, result.err)
 		}
 	}
-	return nil
+	return false, nil
 }
 
-func (r *reconcileAzVolumeAttachment) SyncVolume(ctx context.Context, azVolume v1alpha1.AzVolume, eventType Event, isPrimary, useCache bool) error {
+func (r *reconcileAzVolumeAttachment) SyncVolume(ctx context.Context, volume string, eventType Event, isPrimary, useCache bool) error {
 	// this is to prevent multiple sync volume operation to be performed on a single volume concurrently as it can create or delete more attachments than necessary
 	r.mutexMapMutex.RLock()
-	volMutex, ok := r.mutexMap[azVolume.Spec.UnderlyingVolume]
+	volMutex, ok := r.mutexMap[volume]
 	r.mutexMapMutex.RUnlock()
 	if ok {
 		volMutex.Lock()
 		defer volMutex.Unlock()
+	}
+
+	var azVolume v1alpha1.AzVolume
+	if err := r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: volume}, &azVolume); err != nil {
+		// if AzVolume is not found, the volume is deleted, so do not requeue and do not return error
+		// AzVolumeAttachment objects for the volume will be triggered to be deleted.
+		if errors.IsNotFound(err) {
+			return nil
+		}
+		klog.Errorf("failed to get AzVolume (%s): %v", volume, err)
+		return err
 	}
 
 	// fetch AzVolumeAttachment with AzVolume
@@ -341,7 +384,7 @@ func (r *reconcileAzVolumeAttachment) ManageReplicas(ctx context.Context, underl
 	// manage replica calls should not block each other but should block sync all calls and vice versa
 	r.syncMutex.RLock()
 	defer r.syncMutex.RUnlock()
-	return r.SyncVolume(ctx, azVolume, eventType, isPrimary, true)
+	return r.SyncVolume(ctx, azVolume.Name, eventType, isPrimary, true)
 }
 
 func (r *reconcileAzVolumeAttachment) CreateReplicas(ctx context.Context, numReplica int, underlyingVolume, volumeID string, useCache bool) error {
@@ -685,9 +728,16 @@ func (r *reconcileAzVolumeAttachment) triggerDetach(ctx context.Context, attachm
 		return err
 	}
 
-	if err := r.detachVolume(ctx, azVolumeAttachment.Spec.VolumeID, azVolumeAttachment.Spec.NodeName); err != nil {
-		klog.Errorf("failed to detach volume %s from node %s: %v", azVolumeAttachment.Spec.UnderlyingVolume, azVolumeAttachment.Spec.NodeName, err)
-		return r.updateStatusWithError(ctx, azVolumeAttachment.Name, err)
+	// check if underlying volume attachment exists before proceeding with detachment
+	if azVolumeAttachment.Annotations != nil {
+		vaExists, ok := azVolumeAttachment.Annotations[azureutils.VolumeAttachmentExistsAnnotation]
+		// only detach if volume attachment does not exist or the annotation has not been set
+		if !ok || vaExists == "false" {
+			if err := r.detachVolume(ctx, azVolumeAttachment.Spec.UnderlyingVolume, azVolumeAttachment.Spec.NodeName); err != nil {
+				klog.Errorf("failed to detach volume %s from node %s: %v", azVolumeAttachment.Spec.UnderlyingVolume, azVolumeAttachment.Spec.NodeName, err)
+				return r.updateStatusWithError(ctx, azVolumeAttachment.Name, err)
+			}
+		}
 	}
 
 	if err := r.ManageReplicas(ctx, azVolumeAttachment.Spec.UnderlyingVolume, DetachEvent, azVolumeAttachment.Spec.RequestedRole == v1alpha1.PrimaryRole); err != nil {
@@ -890,11 +940,22 @@ func NewAzVolumeAttachmentController(ctx context.Context, mgr manager.Manager, a
 		return err
 	}
 
-	// initial sync
-	err = reconciler.SyncAll(ctx)
-	if err != nil {
-		klog.Warningf("failed to complete initial AzVolumeAttachment sync: %v", err)
+	// try to recover states
+	for i := 0; i < maxRetry; i++ {
+		retry, err := reconciler.SyncAll(ctx)
+		if err != nil {
+			klog.Warningf("failed to complete initial AzVolumeAttachment sync: %v", err)
+		}
+		if retry == false {
+			break
+		}
 	}
+
+	// create a seperate goroutine listening for context cancellation and clean up before terminating
+	go func(ctx context.Context) {
+		<-ctx.Done()
+		_ = CleanUpAllAzVolumeAttachment(ctx, reconciler.client, reconciler.azVolumeClient, reconciler.namespace)
+	}(ctx)
 
 	klog.V(2).Info("AzVolumeAttachment Controller successfully initialized.")
 	return nil

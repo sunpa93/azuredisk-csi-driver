@@ -334,7 +334,7 @@ func (r *reconcileAzVolume) CleanUpAzVolumeAttachment(ctx context.Context, azVol
 	return nil
 }
 
-func NewAzVolumeController(mgr manager.Manager, azVolumeClient *azVolumeClientSet.Interface, namespace string, cloudProvisioner CloudProvisioner) error {
+func NewAzVolumeController(ctx context.Context, mgr manager.Manager, azVolumeClient *azVolumeClientSet.Interface, namespace string, cloudProvisioner CloudProvisioner) error {
 	logger := mgr.GetLogger().WithValues("controller", "azvolume")
 
 	c, err := controller.New("azvolume-controller", mgr, controller.Options{
@@ -364,7 +364,16 @@ func NewAzVolumeController(mgr manager.Manager, azVolumeClient *azVolumeClientSe
 		return err
 	}
 
-	klog.V(2).Info("Controller set-up successful.")
+	klog.V(2).Info("Controller set-up successfull.")
+
+	// start a separate goroutine to monitor context cancellation. clean up upon cancellation
+	go func(ctx context.Context) {
+		<-ctx.Done()
+		// clean up
+		/*
+			How should the AzVolume controller distinguish deletion of AzVolume triggered by 1) context cancellation and 2) controllerserver delete volume
+		*/
+	}(ctx)
 	return nil
 }
 

@@ -93,8 +93,9 @@ const (
 	KindField                 = "kind"
 
 	// CRDs specific constants
-	PartitionLabel    = "azdrivernodes.disk.csi.azure.com/partition"
-	AzVolumeFinalizer = "disk.csi.azure.com/azvolume-finalizer"
+	PartitionLabel                   = "azdrivernodes.disk.csi.azure.com/partition"
+	AzVolumeFinalizer                = "disk.csi.azure.com/azvolume-finalizer"
+	VolumeAttachmentExistsAnnotation = "disk.csi.azure.com/volume-attachment-exists"
 
 	// ZRS specific constants
 	WellKnownTopologyKey = "topology.kubernetes.io/zone"

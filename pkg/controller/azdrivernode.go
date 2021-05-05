@@ -103,12 +103,30 @@ func (r *reconcileAzDriverNode) DeleteAzVolumeAttachments(ctx context.Context, n
 	return nil
 }
 
+func (r *reconcileAzDriverNode) CleanUpAzDriverNodes(ctx context.Context) error {
+	azDriverNodes, err := r.azVolumeClient.DiskV1alpha1().AzDriverNodes(r.namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		klog.Errorf("failed to list AzDriverNodes: %v", err)
+		return err
+	}
+
+	for _, azDriverNode := range azDriverNodes.Items {
+		if err := r.client.Delete(ctx, &azDriverNode, &client.DeleteOptions{}); err != nil {
+			klog.Errorf("failed to delete AzDriverNodes (%s): %v", azDriverNode.Name, err)
+			return err
+		}
+	}
+
+	return nil
+}
+
 // InitializeAzDriverNodeController initializes azdrivernode-controller
-func InitializeAzDriverNodeController(mgr manager.Manager, azVolumeClient *azVolumeClientSet.Interface, namespace string) error {
+func InitializeAzDriverNodeController(ctx context.Context, mgr manager.Manager, azVolumeClient *azVolumeClientSet.Interface, namespace string) error {
 	logger := mgr.GetLogger().WithValues("controller", "azdrivernode")
+	reconciler := reconcileAzDriverNode{client: mgr.GetClient(), azVolumeClient: *azVolumeClient, namespace: namespace}
 	c, err := controller.New("azdrivernode-controller", mgr, controller.Options{
 		MaxConcurrentReconciles: 10,
-		Reconciler:              &reconcileAzDriverNode{client: mgr.GetClient(), azVolumeClient: *azVolumeClient, namespace: namespace},
+		Reconciler:              &reconciler,
 		Log:                     logger,
 	})
 
@@ -140,6 +158,12 @@ func InitializeAzDriverNodeController(mgr manager.Manager, azVolumeClient *azVol
 		klog.Errorf("Failed to watch nodes. Error: %v", err)
 		return err
 	}
-	klog.V(2).Info("Controller set-up successful.")
+	klog.V(2).Info("Controller set-up successfull.")
+
+	// start a separate goroutine to monitor context cancellation. clean up upon cancellation
+	go func(ctx context.Context) {
+		<-ctx.Done()
+		_ = reconciler.CleanUpAzDriverNodes(ctx)
+	}(ctx)
 	return err
 }

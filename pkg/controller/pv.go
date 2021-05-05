@@ -57,7 +57,7 @@ func (r *reconcilePV) Reconcile(ctx context.Context, request reconcile.Request) 
 		return reconcile.Result{Requeue: true}, err
 	}
 
-	if pv.Spec.CSI == nil || pv.Spec.CSI.Driver != DriverName {
+	if pv.Spec.CSI == nil || pv.Spec.CSI.Driver != azureutils.DriverName {
 		return reconcile.Result{}, nil
 	}
 

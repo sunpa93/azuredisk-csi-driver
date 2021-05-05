@@ -55,9 +55,23 @@ type CloudProvisioner interface {
 	GetMetricPrefix() string
 }
 
-const (
-	DriverName = "disk.csi.azure.com"
-)
+func CleanUpAllAzVolumeAttachment(ctx context.Context, client client.Client, azClient azClientSet.Interface, namespace string) error {
+	var azVolumeAttachments v1alpha1.AzVolumeAttachmentList
+	if err := client.List(ctx, &azVolumeAttachments); err != nil {
+		klog.Errorf("failed to get AzVolumeAttachment List: %v", err)
+		return err
+	}
+
+	for _, attachment := range azVolumeAttachments.Items {
+		if err := azClient.DiskV1alpha1().AzVolumeAttachments(namespace).Delete(ctx, attachment.Name, metav1.DeleteOptions{}); err != nil {
+			klog.Errorf("failed to delete AzVolumeAttachment (%s): %v", attachment.Name, err)
+			return err
+		}
+		klog.V(5).Infof("Set deletion timestamp for AzVolumeAttachment (%s)", attachment.Name)
+	}
+
+	return nil
+}
 
 func CleanUpAzVolumeAttachment(ctx context.Context, client client.Client, azClient azClientSet.Interface, namespace, azVolumeName string) error {
 	var azVolume v1alpha1.AzVolume
