@@ -141,17 +141,6 @@ func (r *reconcileAzVolume) triggerDelete(ctx context.Context, volumeName string
 		klog.Errorf("failed to get AzVolume (%s): %v", volumeName, err)
 		return err
 	}
-
-	if err := r.deleteVolume(ctx, &azVolume); err != nil {
-		klog.Errorf("failed to delete volume %s: %v", azVolume.Spec.UnderlyingVolume, err)
-		return err
-	}
-
-	// Update status of the object
-	if err := r.UpdateStatus(ctx, azVolume.Name, true, nil); err != nil {
-		return err
-	}
-
 	// Delete all AzVolumeAttachment objects bound to the deleted AzVolume
 	volRequirement, _ := labels.NewRequirement(VolumeNameLabel, selection.Equals, []string{azVolume.Spec.UnderlyingVolume})
 	labelSelector := labels.NewSelector().Add(*volRequirement)
@@ -169,6 +158,16 @@ func (r *reconcileAzVolume) triggerDelete(ctx context.Context, volumeName string
 			return err
 		}
 		klog.V(5).Infof("Set deletion timestamp for AzVolumeAttachment (%s)", attachment.Name)
+	}
+
+	if err := r.deleteVolume(ctx, &azVolume); err != nil {
+		klog.Errorf("failed to delete volume %s: %v", azVolume.Spec.UnderlyingVolume, err)
+		return err
+	}
+
+	// Update status of the object
+	if err := r.UpdateStatus(ctx, azVolume.Name, true, nil); err != nil {
+		return err
 	}
 
 	klog.Infof("successfully deleted volume (%s) and its attachments and update status of AzVolume (%s)", azVolume.Spec.UnderlyingVolume, azVolume.Name)
