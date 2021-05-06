@@ -92,6 +92,7 @@ func (r *reconcileAzVolume) Reconcile(ctx context.Context, request reconcile.Req
 		// azVolume update
 		if err := r.triggerUpdate(ctx, azVolume.Name); err != nil {
 			klog.Errorf("failed to update AzVolume (%s): %v", azVolume.Name, err)
+			return reconcile.Result{Requeue: true}, err
 		}
 	}
 
