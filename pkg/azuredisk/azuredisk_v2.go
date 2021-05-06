@@ -302,7 +302,7 @@ func (d *DriverV2) StartControllersAndDieOnExit(ctx context.Context) {
 	}
 
 	klog.V(2).Info("Initializing VolumeAttachment controller")
-	err = controller.NewVolumeAttachmentController(ctx, mgr, d.crdProvisioner.GetDiskClientSetAddr(), d.objectNamespace)
+	err = controller.NewVolumeAttachmentController(ctx, mgr, d.objectNamespace)
 	if err != nil {
 		klog.Errorf("Failed to initialize VolumeAttachmentController. Error: %v. Exiting application...", err)
 		os.Exit(1)

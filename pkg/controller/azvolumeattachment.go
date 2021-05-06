@@ -943,7 +943,7 @@ func NewAzVolumeAttachmentController(ctx context.Context, mgr manager.Manager, a
 		if err != nil {
 			klog.Warningf("failed to complete initial AzVolumeAttachment sync: %v", err)
 		}
-		if retry == false {
+		if !retry {
 			break
 		}
 	}

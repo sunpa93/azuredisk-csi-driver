@@ -26,7 +26,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/azuredisk-csi-driver/pkg/apis/azuredisk/v1alpha1"
-	azVolumeClientSet "sigs.k8s.io/azuredisk-csi-driver/pkg/apis/client/clientset/versioned"
 	"sigs.k8s.io/azuredisk-csi-driver/pkg/azureutils"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -38,9 +37,8 @@ import (
 )
 
 type reconcileVolumeAttachment struct {
-	client         client.Client
-	azVolumeClient azVolumeClientSet.Interface
-	namespace      string
+	client    client.Client
+	namespace string
 }
 
 var _ reconcile.Reconciler = &reconcileVolumeAttachment{}
@@ -78,10 +76,9 @@ func (r *reconcileVolumeAttachment) AnnotateAzVolumeAttachment(ctx context.Conte
 			klog.Errorf("failed to get AzVolumeAttachment (%s): %v", azVolumeAttachmentName, err)
 			return err
 			// if the AzVolumeAttachment object has already been deleted, ignore
-		} else {
-			klog.V(5).Infof("AzVolumeAttachment (%s) already deleted", azVolumeAttachmentName)
-			return nil
 		}
+		klog.V(5).Infof("AzVolumeAttachment (%s) already deleted", azVolumeAttachmentName)
+		return nil
 	}
 
 	updated := azVolumeAttachment.DeepCopy()
@@ -102,11 +99,10 @@ func (r *reconcileVolumeAttachment) AnnotateAzVolumeAttachment(ctx context.Conte
 	return nil
 }
 
-func NewVolumeAttachmentController(ctx context.Context, mgr manager.Manager, azVolumeClient *azVolumeClientSet.Interface, namespace string) error {
+func NewVolumeAttachmentController(ctx context.Context, mgr manager.Manager, namespace string) error {
 	reconciler := reconcileAzVolumeAttachment{
-		client:         mgr.GetClient(),
-		azVolumeClient: *azVolumeClient,
-		namespace:      namespace,
+		client:    mgr.GetClient(),
+		namespace: namespace,
 	}
 
 	c, err := controller.New("volumeattachment-controller", mgr, controller.Options{
