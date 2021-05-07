@@ -725,15 +725,11 @@ func (r *reconcileAzVolumeAttachment) triggerDetach(ctx context.Context, attachm
 		return err
 	}
 
-	// check if underlying volume attachment exists before proceeding with detachment
-	if azVolumeAttachment.Annotations != nil {
-		vaExists, ok := azVolumeAttachment.Annotations[azureutils.VolumeAttachmentExistsAnnotation]
-		// only detach if volume attachment does not exist or the annotation has not been set
-		if !ok || vaExists == "false" {
-			if err := r.detachVolume(ctx, azVolumeAttachment.Spec.UnderlyingVolume, azVolumeAttachment.Spec.NodeName); err != nil {
-				klog.Errorf("failed to detach volume %s from node %s: %v", azVolumeAttachment.Spec.UnderlyingVolume, azVolumeAttachment.Spec.NodeName, err)
-				return r.updateStatusWithError(ctx, azVolumeAttachment.Name, err)
-			}
+	// only detach if volume attachment does not exist or the annotation has not been set
+	if azVolumeAttachment.Annotations == nil || !metav1.HasAnnotation(azVolumeAttachment.ObjectMeta, azureutils.VolumeAttachmentExistsAnnotation) {
+		if err := r.detachVolume(ctx, azVolumeAttachment.Spec.UnderlyingVolume, azVolumeAttachment.Spec.NodeName); err != nil {
+			klog.Errorf("failed to detach volume %s from node %s: %v", azVolumeAttachment.Spec.UnderlyingVolume, azVolumeAttachment.Spec.NodeName, err)
+			return r.updateStatusWithError(ctx, azVolumeAttachment.Name, err)
 		}
 	}
 

@@ -95,7 +95,7 @@ const (
 	// CRDs specific constants
 	PartitionLabel                   = "azdrivernodes.disk.csi.azure.com/partition"
 	AzVolumeFinalizer                = "disk.csi.azure.com/azvolume-finalizer"
-	VolumeAttachmentExistsAnnotation = "disk.csi.azure.com/volume-attachment-exists"
+	VolumeAttachmentExistsAnnotation = "disk.csi.azure.com/volume-attachment"
 
 	// ZRS specific constants
 	WellKnownTopologyKey = "topology.kubernetes.io/zone"

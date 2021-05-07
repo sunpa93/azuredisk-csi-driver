@@ -16,7 +16,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"strconv"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -63,13 +62,13 @@ func (r *reconcileVolumeAttachment) Reconcile(ctx context.Context, request recon
 		return reconcile.Result{Requeue: false}, status.Error(codes.Aborted, fmt.Sprintf("PV name is set nil for VolumeAttachment (%s)", volumeAttachment.Name))
 	}
 	nodeName := volumeAttachment.Spec.NodeName
-	if err := r.AnnotateAzVolumeAttachment(ctx, azureutils.GetAzVolumeAttachmentName(*volumeName, nodeName), volumeAttachmentExists); err != nil {
+	if err := r.AnnotateAzVolumeAttachment(ctx, azureutils.GetAzVolumeAttachmentName(*volumeName, nodeName), volumeAttachment.Name, volumeAttachmentExists); err != nil {
 		return reconcile.Result{Requeue: true}, err
 	}
 	return reconcile.Result{}, nil
 }
 
-func (r *reconcileVolumeAttachment) AnnotateAzVolumeAttachment(ctx context.Context, azVolumeAttachmentName string, volumeAttachmentExists bool) error {
+func (r *reconcileVolumeAttachment) AnnotateAzVolumeAttachment(ctx context.Context, azVolumeAttachmentName, volumeAttachmentName string, volumeAttachmentExists bool) error {
 	var azVolumeAttachment v1alpha1.AzVolumeAttachment
 	if err := r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: azVolumeAttachmentName}, &azVolumeAttachment); err != nil {
 		if !errors.IsNotFound(err) {
@@ -85,11 +84,19 @@ func (r *reconcileVolumeAttachment) AnnotateAzVolumeAttachment(ctx context.Conte
 	if updated.Annotations == nil {
 		updated.Annotations = make(map[string]string)
 	}
-	// avoid unnecessary update
-	if vaExists, ok := updated.Annotations[azureutils.VolumeAttachmentExistsAnnotation]; ok && vaExists == strconv.FormatBool(volumeAttachmentExists) {
-		return nil
+
+	_, ok := updated.Annotations[azureutils.VolumeAttachmentExistsAnnotation]
+	if volumeAttachmentExists {
+		if ok {
+			return nil
+		}
+		updated.Annotations[azureutils.VolumeAttachmentExistsAnnotation] = volumeAttachmentName
+	} else {
+		if !ok {
+			return nil
+		}
+		delete(updated.Annotations, azureutils.VolumeAttachmentExistsAnnotation)
 	}
-	updated.Annotations[azureutils.VolumeAttachmentExistsAnnotation] = strconv.FormatBool(volumeAttachmentExists)
 
 	if err := r.client.Update(ctx, updated, &client.UpdateOptions{}); err != nil {
 		klog.Errorf("failed to update AzVolumeAttachment (%s): %v", azVolumeAttachmentName, err)
