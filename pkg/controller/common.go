@@ -23,7 +23,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/azuredisk-csi-driver/pkg/apis/azuredisk/v1alpha1"
 	azClientSet "sigs.k8s.io/azuredisk-csi-driver/pkg/apis/client/clientset/versioned"
@@ -55,33 +54,8 @@ type CloudProvisioner interface {
 	GetMetricPrefix() string
 }
 
-func CleanUpAllAzVolumeAttachment(ctx context.Context, client client.Client, azClient azClientSet.Interface, namespace string) error {
-	var azVolumeAttachments v1alpha1.AzVolumeAttachmentList
-	if err := client.List(ctx, &azVolumeAttachments); err != nil {
-		klog.Errorf("failed to get AzVolumeAttachment List: %v", err)
-		return err
-	}
-
-	for _, attachment := range azVolumeAttachments.Items {
-		if err := azClient.DiskV1alpha1().AzVolumeAttachments(namespace).Delete(ctx, attachment.Name, metav1.DeleteOptions{}); err != nil {
-			klog.Errorf("failed to delete AzVolumeAttachment (%s): %v", attachment.Name, err)
-			return err
-		}
-		klog.V(5).Infof("Set deletion timestamp for AzVolumeAttachment (%s)", attachment.Name)
-	}
-
-	return nil
-}
-
-func CleanUpAzVolumeAttachment(ctx context.Context, client client.Client, azClient azClientSet.Interface, namespace, azVolumeName string) error {
-	var azVolume v1alpha1.AzVolume
-	err := client.Get(ctx, types.NamespacedName{Namespace: namespace, Name: azVolumeName}, &azVolume)
-	if err != nil {
-		klog.Errorf("failed to get AzVolume (%s): %v", azVolumeName, err)
-		return err
-	}
-
-	volRequirement, _ := labels.NewRequirement(VolumeNameLabel, selection.Equals, []string{azVolume.Spec.UnderlyingVolume})
+func cleanUpAzVolumeAttachmentByVolume(ctx context.Context, client client.Client, azClient azClientSet.Interface, namespace, azVolumeName string) error {
+	volRequirement, _ := labels.NewRequirement(VolumeNameLabel, selection.Equals, []string{azVolumeName})
 	labelSelector := labels.NewSelector().Add(*volRequirement)
 
 	attachments, err := azClient.DiskV1alpha1().AzVolumeAttachments(namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector.String()})
@@ -90,14 +64,37 @@ func CleanUpAzVolumeAttachment(ctx context.Context, client client.Client, azClie
 		return err
 	}
 
+	if err := cleanUpAzVolumeAttachments(ctx, client, azClient, namespace, attachments); err != nil {
+		return err
+	}
+	klog.Infof("successfully deleted AzVolumeAttachments for AzVolume (%s)", azVolumeName)
+	return nil
+}
+
+func cleanUpAzVolumeAttachmentByNode(ctx context.Context, client client.Client, azClient azClientSet.Interface, namespace, azDriverNodeName string) error {
+	nodeRequirement, _ := labels.NewRequirement(NodeNameLabel, selection.Equals, []string{azDriverNodeName})
+	labelSelector := labels.NewSelector().Add(*nodeRequirement)
+
+	attachments, err := azClient.DiskV1alpha1().AzVolumeAttachments(namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector.String()})
+	if err != nil && !errors.IsNotFound(err) {
+		klog.Errorf("failed to get AzVolumeAttachments: %v", err)
+		return err
+	}
+
+	if err := cleanUpAzVolumeAttachments(ctx, client, azClient, namespace, attachments); err != nil {
+		return err
+	}
+	klog.Infof("successfully deleted AzVolumeAttachments for AzDriverNode (%s)", azDriverNodeName)
+	return nil
+}
+
+func cleanUpAzVolumeAttachments(ctx context.Context, client client.Client, azClient azClientSet.Interface, namespace string, attachments *v1alpha1.AzVolumeAttachmentList) error {
 	for _, attachment := range attachments.Items {
-		if err = azClient.DiskV1alpha1().AzVolumeAttachments(namespace).Delete(ctx, attachment.Name, metav1.DeleteOptions{}); err != nil {
+		if err := azClient.DiskV1alpha1().AzVolumeAttachments(namespace).Delete(ctx, attachment.Name, metav1.DeleteOptions{}); err != nil {
 			klog.Errorf("failed to delete AzVolumeAttachment (%s): %v", attachment.Name, err)
 			return err
 		}
 		klog.V(5).Infof("Set deletion timestamp for AzVolumeAttachment (%s)", attachment.Name)
 	}
-
-	klog.Infof("successfully deleted AzVolumeAttachments for AzVolume (%s)", azVolume.Name)
 	return nil
 }

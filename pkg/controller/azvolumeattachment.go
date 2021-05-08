@@ -78,7 +78,7 @@ type reconcileAzVolumeAttachment struct {
 
 	cloudProvisioner CloudProvisioner
 
-	// syncMutex is used to prevent other syncVolume calls to be performed during SyncAll routine
+	// syncMutex is used to prevent other syncVolume calls to be performed during syncAll routine
 	syncMutex sync.RWMutex
 	// muteMap maps volume name to mutex, it is used to guarantee that only one sync call is made at a time per volume
 	mutexMap map[string]*sync.Mutex
@@ -103,10 +103,10 @@ type filteredNode struct {
 var _ reconcile.Reconciler = &reconcileAzVolumeAttachment{}
 
 func (r *reconcileAzVolumeAttachment) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
-	return r.HandleAzVolumeAttachmentEvent(ctx, request)
+	return r.handleAzVolumeAttachmentEvent(ctx, request)
 }
 
-func (r *reconcileAzVolumeAttachment) HandleAzVolumeAttachmentEvent(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
+func (r *reconcileAzVolumeAttachment) handleAzVolumeAttachmentEvent(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
 	var azVolumeAttachment v1alpha1.AzVolumeAttachment
 	err := r.client.Get(ctx, request.NamespacedName, &azVolumeAttachment)
 	// if object is not found, it means the object has been deleted. Log the deletion and do not requeue
@@ -116,7 +116,7 @@ func (r *reconcileAzVolumeAttachment) HandleAzVolumeAttachmentEvent(ctx context.
 		underlyingVolume, ok := r.volumeMap[request.Name]
 		r.volumeMapMutex.RUnlock()
 		if ok {
-			if err = r.ManageReplicas(ctx, underlyingVolume, DeleteEvent, false); err != nil {
+			if err = r.manageReplicas(ctx, underlyingVolume, DeleteEvent, false); err != nil {
 				klog.Errorf("failed to manage replicas for volume (%s): %v", underlyingVolume, err)
 				return reconcile.Result{Requeue: true}, err
 			}
@@ -143,7 +143,7 @@ func (r *reconcileAzVolumeAttachment) HandleAzVolumeAttachmentEvent(ctx context.
 		// if the azVolumeAttachment's deletion timestamp has been set, and is before the current time, detach the disk from the node and delete the finalizer
 	} else if now := metav1.Now(); azVolumeAttachment.ObjectMeta.DeletionTimestamp.Before(&now) {
 		klog.Infof("Initiating Detach operation for AzVolumeAttachment (%s)", azVolumeAttachment.Name)
-		if err := r.triggerDetach(ctx, azVolumeAttachment.Name); err != nil {
+		if err := r.triggerDetach(ctx, azVolumeAttachment.Name, false); err != nil {
 			// if detach failed, requeue the request
 			klog.Errorf("failed to delete AzVolumeAttachment (%s): %v", azVolumeAttachment.Name, err)
 			return reconcile.Result{Requeue: true}, err
@@ -151,7 +151,7 @@ func (r *reconcileAzVolumeAttachment) HandleAzVolumeAttachmentEvent(ctx context.
 		// if the role in status and spec are different, it is an update event where replica should be turned into a primary
 	} else if azVolumeAttachment.Spec.RequestedRole != azVolumeAttachment.Status.Role {
 		klog.Infof("Promoting AzVolumeAttachment (%s) from replica to primary", azVolumeAttachment.Name)
-		if err := r.UpdateStatus(ctx, azVolumeAttachment.Name, azVolumeAttachment.Status.PublishContext); err != nil {
+		if err := r.updateStatus(ctx, azVolumeAttachment.Name, azVolumeAttachment.Status.PublishContext); err != nil {
 			klog.Errorf("failed to promote AzVolumeAttachment (%s) from replica to primary: %v", azVolumeAttachment.Name, err)
 			return reconcile.Result{Requeue: true}, err
 		}
@@ -170,25 +170,35 @@ func (r *reconcileAzVolumeAttachment) getRoleCount(ctx context.Context, azVolume
 }
 
 // ManageAttachmentsForVolume will be runing on a separate channel
-func (r *reconcileAzVolumeAttachment) SyncAll(ctx context.Context) (bool, error) {
+func (r *reconcileAzVolumeAttachment) syncAll(ctx context.Context, syncedVolumeAttachments map[string]bool, volumesToSync map[string]bool) (bool, map[string]bool, map[string]bool, error) {
 	r.syncMutex.Lock()
 	defer r.syncMutex.Unlock()
 
-	volumesToSync := []string{}
 	// Get all volumeAttachments
 	var volumeAttachments storagev1.VolumeAttachmentList
 	if err := r.client.List(ctx, &volumeAttachments, &client.ListOptions{}); err != nil {
-		return true, err
+		return true, syncedVolumeAttachments, volumesToSync, err
+	}
+
+	if syncedVolumeAttachments == nil {
+		syncedVolumeAttachments = map[string]bool{}
+	}
+	if volumesToSync == nil {
+		volumesToSync = map[string]bool{}
 	}
 
 	// Loop through volumeAttachments and create Primary AzVolumeAttachments in correspondence
 	for _, volumeAttachment := range volumeAttachments.Items {
+		// skip if sync has been completed volumeAttachment
+		if syncedVolumeAttachments[volumeAttachment.Name] {
+			continue
+		}
 		if volumeAttachment.Spec.Attacher == azureutils.DriverName {
 			volumeName := volumeAttachment.Spec.Source.PersistentVolumeName
 			if volumeName == nil {
 				continue
 			}
-			volumesToSync = append(volumesToSync, *volumeName)
+			volumesToSync[*volumeName] = true
 
 			nodeName := volumeAttachment.Spec.NodeName
 			err := r.client.Create(ctx, &v1alpha1.AzVolumeAttachment{
@@ -203,8 +213,9 @@ func (r *reconcileAzVolumeAttachment) SyncAll(ctx context.Context) (bool, error)
 			}, &client.CreateOptions{})
 			if err != nil {
 				klog.Errorf("failed to create AzVolumeAttachment (%s) for volume (%s) and node (%s): %v", azureutils.GetAzVolumeAttachmentName(*volumeName, nodeName), *volumeName, nodeName, err)
-				return true, err
+				return true, syncedVolumeAttachments, volumesToSync, err
 			}
+			syncedVolumeAttachments[volumeAttachment.Name] = true
 		}
 	}
 
@@ -225,11 +236,11 @@ func (r *reconcileAzVolumeAttachment) SyncAll(ctx context.Context) (bool, error)
 	// Sync all volumes and reset mutexMap in case some volumes had been deleted
 	r.mutexMapMutex.Lock()
 	r.mutexMap = make(map[string]*sync.Mutex)
-	for _, volume := range volumesToSync {
+	for volume := range volumesToSync {
 		r.mutexMap[volume] = &sync.Mutex{}
 		workerControl <- struct{}{}
 		go func(vol string) {
-			results <- resultStruct{err: r.SyncVolume(ctx, vol, SyncEvent, false, false), volume: vol}
+			results <- resultStruct{err: r.syncVolume(ctx, vol, SyncEvent, false, false), volume: vol}
 			<-workerControl
 		}(volume)
 	}
@@ -240,12 +251,14 @@ func (r *reconcileAzVolumeAttachment) SyncAll(ctx context.Context) (bool, error)
 		result := <-results
 		if result.err != nil {
 			klog.Errorf("failed in process of syncing AzVolume (%s): %v", result.volume, result.err)
+		} else {
+			delete(volumesToSync, result.volume)
 		}
 	}
-	return false, nil
+	return false, syncedVolumeAttachments, volumesToSync, nil
 }
 
-func (r *reconcileAzVolumeAttachment) SyncVolume(ctx context.Context, volume string, eventType Event, isPrimary, useCache bool) error {
+func (r *reconcileAzVolumeAttachment) syncVolume(ctx context.Context, volume string, eventType Event, isPrimary, useCache bool) error {
 	// this is to prevent multiple sync volume operation to be performed on a single volume concurrently as it can create or delete more attachments than necessary
 	r.mutexMapMutex.RLock()
 	volMutex, ok := r.mutexMap[volume]
@@ -325,7 +338,7 @@ func (r *reconcileAzVolumeAttachment) SyncVolume(ctx context.Context, volume str
 			go func(ctx context.Context) {
 				// Sleep
 				time.Sleep(defaultTimeUntilDeletion)
-				_ = CleanUpAzVolumeAttachment(ctx, r.client, r.azVolumeClient, r.namespace, azVolume.Name)
+				_ = cleanUpAzVolumeAttachmentByVolume(ctx, r.client, r.azVolumeClient, r.namespace, azVolume.Name)
 			}(deletionCtx)
 		}
 		return nil
@@ -340,7 +353,7 @@ func (r *reconcileAzVolumeAttachment) SyncVolume(ctx context.Context, volume str
 			// underlying volume does not exist, so volume attachment cannot be made
 			return nil
 		}
-		if err = r.CreateReplicas(ctx, min(defaultMaxReplicaUpdateCount, desiredReplicaCount-currentReplicaCount), azVolume.Spec.UnderlyingVolume, azVolume.Status.ResponseObject.VolumeID, useCache); err != nil {
+		if err = r.createReplicas(ctx, min(defaultMaxReplicaUpdateCount, desiredReplicaCount-currentReplicaCount), azVolume.Spec.UnderlyingVolume, azVolume.Status.ResponseObject.VolumeID, useCache); err != nil {
 			klog.Errorf("failed to create %d replicas for volume (%s): %v", desiredReplicaCount-currentReplicaCount, azVolume.Spec.UnderlyingVolume, err)
 			return err
 		}
@@ -366,7 +379,7 @@ func (r *reconcileAzVolumeAttachment) SyncVolume(ctx context.Context, volume str
 	return nil
 }
 
-func (r *reconcileAzVolumeAttachment) ManageReplicas(ctx context.Context, underlyingVolume string, eventType Event, isPrimary bool) error {
+func (r *reconcileAzVolumeAttachment) manageReplicas(ctx context.Context, underlyingVolume string, eventType Event, isPrimary bool) error {
 	var azVolume v1alpha1.AzVolume
 	if err := r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: underlyingVolume}, &azVolume); err != nil {
 		// if AzVolume is not found, the volume is deleted, so do not requeue and do not return error
@@ -381,10 +394,10 @@ func (r *reconcileAzVolumeAttachment) ManageReplicas(ctx context.Context, underl
 	// manage replica calls should not block each other but should block sync all calls and vice versa
 	r.syncMutex.RLock()
 	defer r.syncMutex.RUnlock()
-	return r.SyncVolume(ctx, azVolume.Name, eventType, isPrimary, true)
+	return r.syncVolume(ctx, azVolume.Name, eventType, isPrimary, true)
 }
 
-func (r *reconcileAzVolumeAttachment) CreateReplicas(ctx context.Context, numReplica int, underlyingVolume, volumeID string, useCache bool) error {
+func (r *reconcileAzVolumeAttachment) createReplicas(ctx context.Context, numReplica int, underlyingVolume, volumeID string, useCache bool) error {
 	// if volume is scheduled for clean up, skip replica creation
 	r.cleanUpMapMutex.Lock()
 	_, cleanUpScheduled := r.cleanUpMap[underlyingVolume]
@@ -394,7 +407,7 @@ func (r *reconcileAzVolumeAttachment) CreateReplicas(ctx context.Context, numRep
 		return nil
 	}
 
-	nodes, err := r.GetNodesForReplica(ctx, numReplica, underlyingVolume, false, useCache)
+	nodes, err := r.getNodesForReplica(ctx, numReplica, underlyingVolume, false, useCache)
 	if err != nil {
 		klog.Errorf("failed to get a list of nodes for replica attachment: %v", err)
 		return err
@@ -428,7 +441,7 @@ func (r *reconcileAzVolumeAttachment) CreateReplicas(ctx context.Context, numRep
 	return nil
 }
 
-func (r *reconcileAzVolumeAttachment) GetNodesForReplica(ctx context.Context, numReplica int, underlyingVolume string, reverse, useCache bool) ([]filteredNode, error) {
+func (r *reconcileAzVolumeAttachment) getNodesForReplica(ctx context.Context, numReplica int, underlyingVolume string, reverse, useCache bool) ([]filteredNode, error) {
 	filteredNodes := []filteredNode{}
 	var nodes *v1alpha1.AzDriverNodeList
 	var err error
@@ -503,7 +516,7 @@ func (r *reconcileAzVolumeAttachment) GetNodesForReplica(ctx context.Context, nu
 }
 
 // Deprecated
-func (r *reconcileAzVolumeAttachment) ListReplicasByVolume(ctx context.Context, volume string) ([]v1alpha1.AzVolumeAttachment, error) {
+func (r *reconcileAzVolumeAttachment) listReplicasByVolume(ctx context.Context, volume string) ([]v1alpha1.AzVolumeAttachment, error) {
 	replicas := []v1alpha1.AzVolumeAttachment{}
 	attachments, err := r.azVolumeClient.DiskV1alpha1().AzVolumeAttachments(r.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -520,7 +533,7 @@ func (r *reconcileAzVolumeAttachment) ListReplicasByVolume(ctx context.Context, 
 	return replicas, nil
 }
 
-func (r *reconcileAzVolumeAttachment) ListAzVolumeAttachmentsByNodeName(ctx context.Context, nodeName string) ([]v1alpha1.AzVolumeAttachment, error) {
+func (r *reconcileAzVolumeAttachment) listAzVolumeAttachmentsByNodeName(ctx context.Context, nodeName string) ([]v1alpha1.AzVolumeAttachment, error) {
 	filteredAttachments := []v1alpha1.AzVolumeAttachment{}
 	attachments, err := r.azVolumeClient.DiskV1alpha1().AzVolumeAttachments(r.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -537,7 +550,7 @@ func (r *reconcileAzVolumeAttachment) ListAzVolumeAttachmentsByNodeName(ctx cont
 	return filteredAttachments, nil
 }
 
-func (r *reconcileAzVolumeAttachment) InitializeMeta(ctx context.Context, attachmentName string) error {
+func (r *reconcileAzVolumeAttachment) initializeMeta(ctx context.Context, attachmentName string) error {
 	var azVolumeAttachment v1alpha1.AzVolumeAttachment
 	if err := r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: attachmentName}, &azVolumeAttachment); err != nil {
 		klog.Errorf("failed to get AzVolumeAttachment (%s): %v", attachmentName, err)
@@ -576,7 +589,7 @@ func (r *reconcileAzVolumeAttachment) InitializeMeta(ctx context.Context, attach
 	return nil
 }
 
-func (r *reconcileAzVolumeAttachment) DeleteFinalizer(ctx context.Context, attachmentName string) error {
+func (r *reconcileAzVolumeAttachment) deleteFinalizer(ctx context.Context, attachmentName string) error {
 	var azVolumeAttachment v1alpha1.AzVolumeAttachment
 	if err := r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: attachmentName}, &azVolumeAttachment); err != nil {
 		klog.Errorf("failed to get AzVolumeAttachment (%s): %v", attachmentName, err)
@@ -603,7 +616,7 @@ func (r *reconcileAzVolumeAttachment) DeleteFinalizer(ctx context.Context, attac
 	return nil
 }
 
-func (r *reconcileAzVolumeAttachment) AddFinalizerToAzVolume(ctx context.Context, volumeName string) error {
+func (r *reconcileAzVolumeAttachment) addFinalizerToAzVolume(ctx context.Context, volumeName string) error {
 	var azVolume v1alpha1.AzVolume
 	if err := r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: volumeName}, &azVolume); err != nil {
 		klog.Errorf("failed to get AzVolume (%s): %v", volumeName, err)
@@ -629,7 +642,7 @@ func (r *reconcileAzVolumeAttachment) AddFinalizerToAzVolume(ctx context.Context
 	return nil
 }
 
-func (r *reconcileAzVolumeAttachment) DeleteFinalizerFromAzVolume(ctx context.Context, volumeName string) error {
+func (r *reconcileAzVolumeAttachment) deleteFinalizerFromAzVolume(ctx context.Context, volumeName string) error {
 	var azVolume v1alpha1.AzVolume
 	if err := r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: volumeName}, &azVolume); err != nil {
 		if errors.IsNotFound(err) {
@@ -702,23 +715,23 @@ func (r *reconcileAzVolumeAttachment) triggerAttach(ctx context.Context, attachm
 	}
 
 	// Initialize finalizer and add label to the object
-	if err := r.InitializeMeta(ctx, azVolumeAttachment.Name); err != nil {
+	if err := r.initializeMeta(ctx, azVolumeAttachment.Name); err != nil {
 		return err
 	}
 
-	if err := r.AddFinalizerToAzVolume(ctx, azVolumeAttachment.Spec.UnderlyingVolume); err != nil {
+	if err := r.addFinalizerToAzVolume(ctx, azVolumeAttachment.Spec.UnderlyingVolume); err != nil {
 		return err
 	}
 
 	// Update status of the object
-	if err := r.UpdateStatus(ctx, azVolumeAttachment.Name, response); err != nil {
+	if err := r.updateStatus(ctx, azVolumeAttachment.Name, response); err != nil {
 		return err
 	}
 	klog.Infof("successfully attached volume (%s) to node (%s) and update status of AzVolumeAttachment (%s)", azVolumeAttachment.Spec.UnderlyingVolume, azVolumeAttachment.Spec.NodeName, azVolumeAttachment.Name)
 	return nil
 }
 
-func (r *reconcileAzVolumeAttachment) triggerDetach(ctx context.Context, attachmentName string) error {
+func (r *reconcileAzVolumeAttachment) triggerDetach(ctx context.Context, attachmentName string, isCleanUp bool) error {
 	var azVolumeAttachment v1alpha1.AzVolumeAttachment
 	if err := r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: attachmentName}, &azVolumeAttachment); err != nil {
 		klog.Errorf("failed to get AzVolumeAttachment (%s): %v", attachmentName, err)
@@ -733,13 +746,16 @@ func (r *reconcileAzVolumeAttachment) triggerDetach(ctx context.Context, attachm
 		}
 	}
 
-	if err := r.ManageReplicas(ctx, azVolumeAttachment.Spec.UnderlyingVolume, DetachEvent, azVolumeAttachment.Spec.RequestedRole == v1alpha1.PrimaryRole); err != nil {
-		klog.Errorf("failed to manage replicas for volume (%s): %v", azVolumeAttachment.Spec.UnderlyingVolume, err)
-		return err
+	// skip replica management during clean up
+	if !isCleanUp {
+		if err := r.manageReplicas(ctx, azVolumeAttachment.Spec.UnderlyingVolume, DetachEvent, azVolumeAttachment.Spec.RequestedRole == v1alpha1.PrimaryRole); err != nil {
+			klog.Errorf("failed to manage replicas for volume (%s): %v", azVolumeAttachment.Spec.UnderlyingVolume, err)
+			return err
+		}
 	}
 
 	// If above procedures were successful, remove finalizer from the object
-	if err := r.DeleteFinalizer(ctx, azVolumeAttachment.Name); err != nil {
+	if err := r.deleteFinalizer(ctx, azVolumeAttachment.Name); err != nil {
 		klog.Errorf("failed to delete finalizer %s for azvolumeattachment %s: %v", AzVolumeAttachmentFinalizer, azVolumeAttachment.Name, err)
 		return err
 	}
@@ -750,6 +766,35 @@ func (r *reconcileAzVolumeAttachment) triggerDetach(ctx context.Context, attachm
 	r.volumeMapMutex.Unlock()
 
 	klog.Infof("successfully detached volume %s from node %s and deleted %s", azVolumeAttachment.Spec.UnderlyingVolume, azVolumeAttachment.Spec.NodeName, azVolumeAttachment.Name)
+	return nil
+}
+
+func (r *reconcileAzVolumeAttachment) updateStatus(ctx context.Context, attachmentName string, status map[string]string) error {
+	var azVolumeAttachment v1alpha1.AzVolumeAttachment
+	if err := r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: attachmentName}, &azVolumeAttachment); err != nil {
+		klog.Errorf("failed to get AzVolumeAttachment (%s): %v", attachmentName, err)
+		return err
+	}
+
+	// Create replica if necessary
+	if err := r.manageReplicas(ctx, azVolumeAttachment.Spec.UnderlyingVolume, AttachEvent, azVolumeAttachment.Spec.RequestedRole == v1alpha1.PrimaryRole); err != nil {
+		klog.Errorf("failed creating replicas for AzVolume (%s): %v")
+		return err
+	}
+
+	updated := azVolumeAttachment.DeepCopy()
+	updated.Status = azVolumeAttachment.Status.DeepCopy()
+	if updated.Status == nil {
+		updated.Status = &v1alpha1.AzVolumeAttachmentStatus{}
+	}
+	updated.Status.Role = azVolumeAttachment.Spec.RequestedRole
+	updated.Status.PublishContext = status
+
+	if err := r.client.Status().Update(ctx, updated, &client.UpdateOptions{}); err != nil {
+		klog.Errorf("failed to update status of AzVolumeAttachment (%s): %v", attachmentName, err)
+		return err
+	}
+
 	return nil
 }
 
@@ -791,35 +836,6 @@ func (r *reconcileAzVolumeAttachment) updateStatusWithError(ctx context.Context,
 			return err
 		}
 	}
-	return nil
-}
-
-func (r *reconcileAzVolumeAttachment) UpdateStatus(ctx context.Context, attachmentName string, status map[string]string) error {
-	var azVolumeAttachment v1alpha1.AzVolumeAttachment
-	if err := r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: attachmentName}, &azVolumeAttachment); err != nil {
-		klog.Errorf("failed to get AzVolumeAttachment (%s): %v", attachmentName, err)
-		return err
-	}
-
-	// Create replica if necessary
-	if err := r.ManageReplicas(ctx, azVolumeAttachment.Spec.UnderlyingVolume, AttachEvent, azVolumeAttachment.Spec.RequestedRole == v1alpha1.PrimaryRole); err != nil {
-		klog.Errorf("failed creating replicas for AzVolume (%s): %v")
-		return err
-	}
-
-	updated := azVolumeAttachment.DeepCopy()
-	updated.Status = azVolumeAttachment.Status.DeepCopy()
-	if updated.Status == nil {
-		updated.Status = &v1alpha1.AzVolumeAttachmentStatus{}
-	}
-	updated.Status.Role = azVolumeAttachment.Spec.RequestedRole
-	updated.Status.PublishContext = status
-
-	if err := r.client.Status().Update(ctx, updated, &client.UpdateOptions{}); err != nil {
-		klog.Errorf("failed to update status of AzVolumeAttachment (%s): %v", attachmentName, err)
-		return err
-	}
-
 	return nil
 }
 
@@ -900,7 +916,50 @@ func (r *reconcileAzVolumeAttachment) GetDiskInfo(ctx context.Context, volume st
 	return
 }
 
-func NewAzVolumeAttachmentController(ctx context.Context, mgr manager.Manager, azVolumeClient *azVolumeClientSet.Interface, namespace string, cloudProvisioner CloudProvisioner) error {
+func (r *reconcileAzVolumeAttachment) RecoverAndMonitor(wg *sync.WaitGroup, ctx context.Context) error {
+	// try to recover states
+	var syncedVolumeAttachments, volumesToSync map[string]bool
+	for i := 0; i < maxRetry; i++ {
+		var retry bool
+		var err error
+
+		retry, syncedVolumeAttachments, volumesToSync, err = r.syncAll(ctx, syncedVolumeAttachments, volumesToSync)
+		if err != nil {
+			klog.Warningf("failed to complete initial AzVolumeAttachment sync: %v", err)
+		}
+		if !retry {
+			break
+		}
+	}
+
+	// create a seperate goroutine listening for context cancellation and clean up before terminating
+	go func(wg *sync.WaitGroup, ctx context.Context) {
+		wg.Add(1)
+		defer wg.Done()
+		<-ctx.Done()
+		r.cleanUpUponCancel(context.TODO(), r.client, r.azVolumeClient, r.namespace)
+	}(wg, ctx)
+
+	return nil
+}
+
+func (r *reconcileAzVolumeAttachment) cleanUpUponCancel(ctx context.Context, client client.Client, azClient azVolumeClientSet.Interface, namespace string) {
+	azVolumeAttachments, err := azClient.DiskV1alpha1().AzVolumeAttachments(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		klog.Warningf("failed to get AzVolumeAttachment List: %v", err)
+		return
+	}
+
+	for _, attachment := range azVolumeAttachments.Items {
+		if err = r.triggerDetach(ctx, attachment.Name, true); err != nil {
+			klog.Warningf("failed to delete AzVolumeAttachment (%s): %v", attachment.Name, err)
+		} else {
+			klog.V(5).Infof("Deleted AzVolumeAttachment (%s)", attachment.Name)
+		}
+	}
+}
+
+func NewAzVolumeAttachmentController(mgr manager.Manager, azVolumeClient *azVolumeClientSet.Interface, namespace string, cloudProvisioner CloudProvisioner) (*reconcileAzVolumeAttachment, error) {
 	reconciler := reconcileAzVolumeAttachment{
 		client:           mgr.GetClient(),
 		azVolumeClient:   *azVolumeClient,
@@ -923,35 +982,18 @@ func NewAzVolumeAttachmentController(ctx context.Context, mgr manager.Manager, a
 
 	if err != nil {
 		klog.Errorf("failed to create a new azvolumeattachment controller: %v", err)
-		return err
+		return nil, err
 	}
 
 	// Watch for CRUD events on azVolumeAttachment objects
 	err = c.Watch(&source.Kind{Type: &v1alpha1.AzVolumeAttachment{}}, &handler.EnqueueRequestForObject{})
 	if err != nil {
 		klog.Errorf("failed to initialize watch for azvolumeattachment object: %v", err)
-		return err
+		return nil, err
 	}
-
-	// try to recover states
-	for i := 0; i < maxRetry; i++ {
-		retry, err := reconciler.SyncAll(ctx)
-		if err != nil {
-			klog.Warningf("failed to complete initial AzVolumeAttachment sync: %v", err)
-		}
-		if !retry {
-			break
-		}
-	}
-
-	// create a seperate goroutine listening for context cancellation and clean up before terminating
-	go func(ctx context.Context) {
-		<-ctx.Done()
-		_ = CleanUpAllAzVolumeAttachment(ctx, reconciler.client, reconciler.azVolumeClient, reconciler.namespace)
-	}(ctx)
 
 	klog.V(2).Info("AzVolumeAttachment Controller successfully initialized.")
-	return nil
+	return &reconciler, nil
 }
 
 func min(a, b int) int {

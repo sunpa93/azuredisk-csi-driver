@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -198,14 +199,7 @@ func (d *DriverV2) Run(endpoint, kubeconfig string, disableAVSetNodes, testingMo
 	})
 
 	// cancel the context the controller manager will be running under, if receive SIGTERM or SIGINT
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	c := make(chan os.Signal, 2)
-	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-c
-		cancel()
-	}()
+	ctx := context.Background()
 
 	// Start the controllers if this is a controller plug-in
 	if *isControllerPlugin {
@@ -272,26 +266,49 @@ func (d *DriverV2) StartControllersAndDieOnExit(ctx context.Context) {
 		os.Exit(1)
 	}
 
+	cleanUpCtx, cleanUpCancel := context.WithCancel(ctx)
+	defer cleanUpCancel()
+	c := make(chan os.Signal, 2)
+	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
+	go func(cleanUpCancel context.CancelFunc) {
+		<-c
+		cleanUpCancel()
+	}(cleanUpCancel)
+
+	// set waitGroup for cleanup goroutines
+	wg := &sync.WaitGroup{}
+
 	// Setup a new controller to clean-up AzDriverNodes
 	// objects for the nodes which get deleted
 	klog.V(2).Info("Initializing AzDriverNode controller")
-	err = controller.InitializeAzDriverNodeController(ctx, mgr, d.crdProvisioner.GetDiskClientSetAddr(), d.objectNamespace)
+	azdReconciler, err := controller.NewAzDriverNodeController(mgr, d.crdProvisioner.GetDiskClientSetAddr(), d.objectNamespace)
 	if err != nil {
 		klog.Errorf("Failed to initialize AzDriverNodeController. Error: %v. Exiting application...", err)
 		os.Exit(1)
 	}
+	// start monitoring context cancellation and clean up upon exit
+	azdReconciler.MonitorAndCleanUp(wg, cleanUpCtx)
+
 	klog.V(2).Info("Initializing AzVolumeAttachment controller")
-	err = controller.NewAzVolumeAttachmentController(ctx, mgr, d.crdProvisioner.GetDiskClientSetAddr(), d.objectNamespace, d.cloudProvisioner)
+	azvaReconciler, err := controller.NewAzVolumeAttachmentController(mgr, d.crdProvisioner.GetDiskClientSetAddr(), d.objectNamespace, d.cloudProvisioner)
 	if err != nil {
 		klog.Errorf("Failed to initialize AzVolumeAttachmentController. Error: %v. Exiting application...", err)
 		os.Exit(1)
 	}
+	// recover lost states if necessary and start monitoring context cancellation in order to clean up when necessary
+	if err := azvaReconciler.RecoverAndMonitor(wg, cleanUpCtx); err != nil {
+		klog.Warningf("Failed to recover AzVolumeAttachments: %v.", err)
+	}
 
 	klog.V(2).Info("Initializing AzVolume controller")
-	err = controller.NewAzVolumeController(ctx, mgr, d.crdProvisioner.GetDiskClientSetAddr(), d.objectNamespace, d.cloudProvisioner)
+	azvReconciler, err := controller.NewAzVolumeController(mgr, d.crdProvisioner.GetDiskClientSetAddr(), d.objectNamespace, d.cloudProvisioner)
 	if err != nil {
 		klog.Errorf("Failed to initialize AzVolumeController. Error: %v. Exiting application...", err)
 		os.Exit(1)
+	}
+	// recover lost states if necessary and start monitorting context cancellation in order to clean up when necessary
+	if err := azvReconciler.RecoverAndMonitor(wg, cleanUpCtx); err != nil {
+		klog.Warningf("Failed to recover AzVolume: %v", err)
 	}
 
 	klog.V(2).Info("Initializing PV controller")
@@ -308,8 +325,16 @@ func (d *DriverV2) StartControllersAndDieOnExit(ctx context.Context) {
 		os.Exit(1)
 	}
 
+	mgrCtx, mgrCancel := context.WithCancel(ctx)
+	// start goroutine to wait for all clean ups to be completed before cancelling context for the controller manager
+	go func(wg *sync.WaitGroup, mgrCancel context.CancelFunc) {
+		wg.Wait()
+		klog.Infof("Finished cleaning up all CRIs for azuredisk driver. Now shutting down the controller manager...")
+		mgrCancel()
+	}(wg, mgrCancel)
+
 	klog.V(2).Info("Starting controller manager")
-	if err := mgr.Start(ctx); err != nil {
+	if err := mgr.Start(mgrCtx); err != nil {
 		klog.Errorf("Controller manager exited: %v", err)
 		os.Exit(1)
 	}

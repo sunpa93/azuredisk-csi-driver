@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"sync"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -75,7 +76,7 @@ func (r *reconcileAzDriverNode) Reconcile(ctx context.Context, request reconcile
 		}
 
 		// Delete all volumeAttachments attached to this node, if failed, requeue
-		if err = r.DeleteAzVolumeAttachments(ctx, request.Name); err != nil {
+		if err = cleanUpAzVolumeAttachmentByNode(ctx, r.client, r.azVolumeClient, r.namespace, request.Name); err != nil {
 			return reconcile.Result{Requeue: true}, nil
 		}
 		return reconcile.Result{}, nil
@@ -86,24 +87,7 @@ func (r *reconcileAzDriverNode) Reconcile(ctx context.Context, request reconcile
 	return reconcile.Result{Requeue: true}, err
 }
 
-func (r *reconcileAzDriverNode) DeleteAzVolumeAttachments(ctx context.Context, nodeName string) error {
-	attachments, err := r.azVolumeClient.DiskV1alpha1().AzVolumeAttachments(r.namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		klog.Errorf("failed to retrieve list of azVolumeAttachment objects for node %s: %v", err)
-		return err
-	}
-	for _, attachment := range attachments.Items {
-		if attachment.Spec.NodeName == nodeName {
-			if err := r.client.Delete(ctx, &attachment, &client.DeleteOptions{}); err != nil {
-				klog.Errorf("failed to delete AzVolumeAttachment (%s): %v", attachment.Name, err)
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func (r *reconcileAzDriverNode) CleanUpAzDriverNodes(ctx context.Context) error {
+func (r *reconcileAzDriverNode) cleanUpAzDriverNodes(ctx context.Context) error {
 	azDriverNodes, err := r.azVolumeClient.DiskV1alpha1().AzDriverNodes(r.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		klog.Errorf("failed to list AzDriverNodes: %v", err)
@@ -120,8 +104,18 @@ func (r *reconcileAzDriverNode) CleanUpAzDriverNodes(ctx context.Context) error 
 	return nil
 }
 
-// InitializeAzDriverNodeController initializes azdrivernode-controller
-func InitializeAzDriverNodeController(ctx context.Context, mgr manager.Manager, azVolumeClient *azVolumeClientSet.Interface, namespace string) error {
+func (r *reconcileAzDriverNode) MonitorAndCleanUp(wg *sync.WaitGroup, ctx context.Context) {
+	// start a separate goroutine to monitor context cancellation. clean up upon cancellation
+	go func(wg *sync.WaitGroup, ctx context.Context) {
+		wg.Add(1)
+		defer wg.Done()
+		<-ctx.Done()
+		_ = r.cleanUpAzDriverNodes(context.TODO())
+	}(wg, ctx)
+}
+
+// NewAzDriverNodeController initializes azdrivernode-controller
+func NewAzDriverNodeController(mgr manager.Manager, azVolumeClient *azVolumeClientSet.Interface, namespace string) (*reconcileAzDriverNode, error) {
 	logger := mgr.GetLogger().WithValues("controller", "azdrivernode")
 	reconciler := reconcileAzDriverNode{client: mgr.GetClient(), azVolumeClient: *azVolumeClient, namespace: namespace}
 	c, err := controller.New("azdrivernode-controller", mgr, controller.Options{
@@ -132,7 +126,7 @@ func InitializeAzDriverNodeController(ctx context.Context, mgr manager.Manager, 
 
 	if err != nil {
 		klog.Errorf("Failed to create azdrivernode controller. Error: %v", err)
-		return err
+		return nil, err
 	}
 
 	// Predicate to only reconcile deleted nodes
@@ -156,14 +150,9 @@ func InitializeAzDriverNodeController(ctx context.Context, mgr manager.Manager, 
 	err = c.Watch(&source.Kind{Type: &corev1.Node{}}, &handler.EnqueueRequestForObject{}, p)
 	if err != nil {
 		klog.Errorf("Failed to watch nodes. Error: %v", err)
-		return err
+		return nil, err
 	}
 	klog.V(2).Info("Controller set-up successfull.")
 
-	// start a separate goroutine to monitor context cancellation. clean up upon cancellation
-	go func(ctx context.Context) {
-		<-ctx.Done()
-		_ = reconciler.CleanUpAzDriverNodes(ctx)
-	}(ctx)
-	return err
+	return &reconciler, err
 }
