@@ -37,8 +37,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
-// reconcileAzDriverNode reconciles AzDriverNode
-type reconcileAzDriverNode struct {
+// ReconcileAzDriverNode reconciles AzDriverNode
+type ReconcileAzDriverNode struct {
 	client client.Client
 
 	azVolumeClient azVolumeClientSet.Interface
@@ -47,9 +47,9 @@ type reconcileAzDriverNode struct {
 }
 
 // Implement reconcile.Reconciler so the controller can reconcile objects
-var _ reconcile.Reconciler = &reconcileAzDriverNode{}
+var _ reconcile.Reconciler = &ReconcileAzDriverNode{}
 
-func (r *reconcileAzDriverNode) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
+func (r *ReconcileAzDriverNode) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
 	klog.V(2).Info("Checking to see if node (%v) exists.", request.NamespacedName)
 	n := &corev1.Node{}
 	err := r.client.Get(ctx, request.NamespacedName, n)
@@ -87,7 +87,7 @@ func (r *reconcileAzDriverNode) Reconcile(ctx context.Context, request reconcile
 	return reconcile.Result{Requeue: true}, err
 }
 
-func (r *reconcileAzDriverNode) cleanUpAzDriverNodes(ctx context.Context) error {
+func (r *ReconcileAzDriverNode) cleanUpAzDriverNodes(ctx context.Context) error {
 	azDriverNodes, err := r.azVolumeClient.DiskV1alpha1().AzDriverNodes(r.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		klog.Errorf("failed to list AzDriverNodes: %v", err)
@@ -104,10 +104,10 @@ func (r *reconcileAzDriverNode) cleanUpAzDriverNodes(ctx context.Context) error 
 	return nil
 }
 
-func (r *reconcileAzDriverNode) MonitorAndCleanUp(wg *sync.WaitGroup, ctx context.Context) {
+func (r *ReconcileAzDriverNode) MonitorAndCleanUp(ctx context.Context, wg *sync.WaitGroup) {
 	// start a separate goroutine to monitor context cancellation. clean up upon cancellation
+	wg.Add(1)
 	go func(wg *sync.WaitGroup, ctx context.Context) {
-		wg.Add(1)
 		defer wg.Done()
 		<-ctx.Done()
 		_ = r.cleanUpAzDriverNodes(context.TODO())
@@ -115,9 +115,9 @@ func (r *reconcileAzDriverNode) MonitorAndCleanUp(wg *sync.WaitGroup, ctx contex
 }
 
 // NewAzDriverNodeController initializes azdrivernode-controller
-func NewAzDriverNodeController(mgr manager.Manager, azVolumeClient *azVolumeClientSet.Interface, namespace string) (*reconcileAzDriverNode, error) {
+func NewAzDriverNodeController(mgr manager.Manager, azVolumeClient *azVolumeClientSet.Interface, namespace string) (*ReconcileAzDriverNode, error) {
 	logger := mgr.GetLogger().WithValues("controller", "azdrivernode")
-	reconciler := reconcileAzDriverNode{client: mgr.GetClient(), azVolumeClient: *azVolumeClient, namespace: namespace}
+	reconciler := ReconcileAzDriverNode{client: mgr.GetClient(), azVolumeClient: *azVolumeClient, namespace: namespace}
 	c, err := controller.New("azdrivernode-controller", mgr, controller.Options{
 		MaxConcurrentReconciles: 10,
 		Reconciler:              &reconciler,

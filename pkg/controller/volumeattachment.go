@@ -107,7 +107,7 @@ func (r *reconcileVolumeAttachment) AnnotateAzVolumeAttachment(ctx context.Conte
 }
 
 func NewVolumeAttachmentController(ctx context.Context, mgr manager.Manager, namespace string) error {
-	reconciler := reconcileAzVolumeAttachment{
+	reconciler := reconcileVolumeAttachment{
 		client:    mgr.GetClient(),
 		namespace: namespace,
 	}

@@ -287,7 +287,7 @@ func (d *DriverV2) StartControllersAndDieOnExit(ctx context.Context) {
 		os.Exit(1)
 	}
 	// start monitoring context cancellation and clean up upon exit
-	azdReconciler.MonitorAndCleanUp(wg, cleanUpCtx)
+	azdReconciler.MonitorAndCleanUp(cleanUpCtx, wg)
 
 	klog.V(2).Info("Initializing AzVolumeAttachment controller")
 	azvaReconciler, err := controller.NewAzVolumeAttachmentController(mgr, d.crdProvisioner.GetDiskClientSetAddr(), d.objectNamespace, d.cloudProvisioner)
@@ -296,7 +296,7 @@ func (d *DriverV2) StartControllersAndDieOnExit(ctx context.Context) {
 		os.Exit(1)
 	}
 	// recover lost states if necessary and start monitoring context cancellation in order to clean up when necessary
-	if err := azvaReconciler.RecoverAndMonitor(wg, cleanUpCtx); err != nil {
+	if err := azvaReconciler.RecoverAndMonitor(cleanUpCtx, wg); err != nil {
 		klog.Warningf("Failed to recover AzVolumeAttachments: %v.", err)
 	}
 
@@ -307,7 +307,7 @@ func (d *DriverV2) StartControllersAndDieOnExit(ctx context.Context) {
 		os.Exit(1)
 	}
 	// recover lost states if necessary and start monitorting context cancellation in order to clean up when necessary
-	if err := azvReconciler.RecoverAndMonitor(wg, cleanUpCtx); err != nil {
+	if err := azvReconciler.RecoverAndMonitor(cleanUpCtx, wg); err != nil {
 		klog.Warningf("Failed to recover AzVolume: %v", err)
 	}
 
