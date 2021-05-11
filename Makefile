@@ -48,11 +48,15 @@ SCHEDULER_EXTENDER_LDFLAGS ?= "-X ${PKG}/pkg/azuredisk.schedulerVersion=${IMAGE_
 LDFLAGS ?= "-X ${PKG}/pkg/azuredisk.driverVersion=${IMAGE_VERSION} -X ${PKG}/pkg/azuredisk.gitCommit=${GIT_COMMIT} -X ${PKG}/pkg/azuredisk.buildDate=${BUILD_DATE} -X ${PKG}/pkg/azuredisk.DriverName=${DRIVER_NAME} -X ${PKG}/pkg/azuredisk.topologyKey=${TOPOLOGY_KEY} -extldflags "-static"" ${GOTAGS}
 E2E_HELM_OPTIONS ?= --set image.azuredisk.repository=$(REGISTRY)/$(IMAGE_NAME) --set image.azuredisk.tag=$(IMAGE_VERSION) --set image.azuredisk.pullPolicy=Always --set image.schedulerExtender.repository=$(REGISTRY)/$(SCHEDULER_EXTENDER_IMAGE_NAME) --set image.schedulerExtender.tag=$(IMAGE_VERSION) --set image.schedulerExtender.pullPolicy=Always ${ADDITIONAL_E2E_HELM_OPTIONS}
 GINKGO_FLAGS = -ginkgo.v
-ifeq ($(ENABLE_TOPOLOGY), true)
+# If one needs to set focus to specific test cases, set GINKGO_FOCUS env var
+ifneq ($(GINKGO_FOCUS),)
+GINKGO_FLAGS += -ginkgo.focus=${GINKGO_FOCUS}
+else ifeq ($(ENABLE_TOPOLOGY), true)
 GINKGO_FLAGS += -ginkgo.focus="\[multi-az\]"
 else
 GINKGO_FLAGS += -ginkgo.focus="\[single-az\]"
 endif
+
 GOPATH ?= $(shell go env GOPATH)
 GOBIN ?= $(GOPATH)/bin
 GO111MODULE = on
@@ -61,7 +65,7 @@ export GOPATH GOBIN GO111MODULE DOCKER_CLI_EXPERIMENTAL
 
 # Generate all combination of all OS, ARCH, and OSVERSIONS for iteration
 ALL_OS = linux windows
-ALL_ARCH.linux = amd64 arm64
+ALL_ARCH.linux = amd64
 ALL_OS_ARCH.linux = $(foreach arch, ${ALL_ARCH.linux}, linux-$(arch))
 ALL_ARCH.windows = amd64
 ALL_OSVERSIONS.windows := 1809 1903 1909 2004
@@ -111,6 +115,14 @@ integration-test:
 integration-test-v2: container-v2
 	go test -v -timeout=30m ./test/integration --temp-use-driver-v2 --image-tag ${IMAGE_TAG}
 
+.PHONY: e2e-test
+e2e-test:
+	go test -v -timeout=0 ./test/e2e ${GINKGO_FLAGS}
+
+.PHONY: e2e-test-v2
+e2e-test-v2:
+	BUILD_V2=1 go test -v -timeout=0 -tags azurediskv2 ./test/e2e --temp-use-driver-v2
+
 .PHONY: e2e-bootstrap
 e2e-bootstrap: install-helm
 	docker pull $(IMAGE_TAG) || make container-all push-manifest
@@ -142,7 +154,7 @@ e2e-teardown:
 
 .PHONY: azuredisk
 azuredisk:
-	CGO_ENABLED=0 GOOS=linux go build -a -ldflags ${LDFLAGS} -mod vendor -o _output/${ARCH}/${PLUGIN_NAME} ./pkg/azurediskplugin
+	CGO_ENABLED=0 GOOS=linux go build -a -ldflags ${LDFLAGS} -mod vendor -o _output/${PLUGIN_NAME} ./pkg/azurediskplugin
 
 .PHONY: azuredisk-v2
 azuredisk-v2:
@@ -150,7 +162,7 @@ azuredisk-v2:
 
 .PHONY: azuredisk-windows
 azuredisk-windows:
-	CGO_ENABLED=0 GOOS=windows go build -a -ldflags ${LDFLAGS} -mod vendor -o _output/${ARCH}/${PLUGIN_NAME}.exe ./pkg/azurediskplugin
+	CGO_ENABLED=0 GOOS=windows go build -a -ldflags ${LDFLAGS} -mod vendor -o _output/${PLUGIN_NAME}.exe ./pkg/azurediskplugin
 
 .PHONY: azuredisk-windows-v2
 azuredisk-windows-v2:
@@ -158,19 +170,19 @@ azuredisk-windows-v2:
 
 .PHONY: azuredisk-darwin
 azuredisk-darwin:
-	CGO_ENABLED=0 GOOS=darwin go build -a -ldflags ${LDFLAGS} -mod vendor -o _output/${ARCH}/${PLUGIN_NAME}.exe ./pkg/azurediskplugin
+	CGO_ENABLED=0 GOOS=darwin go build -a -ldflags ${LDFLAGS} -mod vendor -o _output/azurediskplugin ./pkg/azurediskplugin
 
 .PHONY: azdiskschedulerextender
 azdiskschedulerextender:
-	CGO_ENABLED=0 GOOS=linux go build -a -ldflags ${SCHEDULER_EXTENDER_LDFLAGS} -mod vendor -o _output/${ARCH}/azdiskschedulerextender ./pkg/azdiskschedulerextender
+	CGO_ENABLED=0 GOOS=linux go build -a -ldflags ${SCHEDULER_EXTENDER_LDFLAGS} -mod vendor -o _output/azdiskschedulerextender ./pkg/azdiskschedulerextender
 
 .PHONY: azdiskschedulerextender-windows
 azdiskschedulerextender-windows:
-	CGO_ENABLED=0 GOOS=windows go build -a -ldflags ${SCHEDULER_EXTENDER_LDFLAGS} -mod vendor -o _output/${ARCH}/azdiskschedulerextender.exe ./pkg/azdiskschedulerextender
+	CGO_ENABLED=0 GOOS=windows go build -a -ldflags ${SCHEDULER_EXTENDER_LDFLAGS} -mod vendor -o _output/azdiskschedulerextender.exe ./pkg/azdiskschedulerextender
 
 .PHONY: azdiskschedulerextender-darwin
 azdiskschedulerextender-darwin:
-	CGO_ENABLED=0 GOOS=darwin go build -a -ldflags ${SCHEDULER_EXTENDER_LDFLAGS} -mod vendor -o _output/${ARCH}/azdiskschedulerextender ./pkg/azdiskschedulerextender
+	CGO_ENABLED=0 GOOS=darwin go build -a -ldflags ${SCHEDULER_EXTENDER_LDFLAGS} -mod vendor -o _output/azdiskschedulerextender ./pkg/azdiskschedulerextender
 
 .PHONY: container
 container: azuredisk
@@ -182,26 +194,13 @@ container-v2: azuredisk-v2
 
 .PHONY: container-linux
 container-linux:
-	docker buildx build . \
-		--pull \
-		--output=type=$(OUTPUT_TYPE) \
-		--tag $(IMAGE_TAG)-linux-$(ARCH) \
-		--file ./pkg/azurediskplugin/Dockerfile \
-		--platform="linux/$(ARCH)" \
-		--build-arg ARCH=${ARCH} \
-		--build-arg PLUGIN_NAME=${PLUGIN_NAME}
+	docker buildx build --pull --output=type=$(OUTPUT_TYPE) --platform="linux/$(ARCH)" --build-arg PLUGIN_NAME=${PLUGIN_NAME} \
+		-t $(IMAGE_TAG)-linux-$(ARCH) -f ./pkg/azurediskplugin/Dockerfile .
 
 .PHONY: container-windows
 container-windows:
-	docker buildx build . \
-		--pull \
-		--output=type=$(OUTPUT_TYPE) \
-		--platform="windows/$(ARCH)" \
-		--tag $(IMAGE_TAG)-windows-$(OSVERSION)-$(ARCH) \
-		--file ./pkg/azurediskplugin/Windows.Dockerfile \
-		--build-arg ARCH=${ARCH} \
-		--build-arg PLUGIN_NAME=${PLUGIN_NAME} \
-		--build-arg OSVERSION=$(OSVERSION) 
+	docker buildx build --pull --output=type=$(OUTPUT_TYPE) --platform="windows/$(ARCH)" --build-arg PLUGIN_NAME=${PLUGIN_NAME} \
+		 -t $(IMAGE_TAG)-windows-$(OSVERSION)-$(ARCH) --build-arg OSVERSION=$(OSVERSION) -f ./pkg/azurediskplugin/Windows.Dockerfile .
 
 .PHONY: azdiskschedulerextender-container
 azdiskschedulerextender-container: azdiskschedulerextender
@@ -209,53 +208,34 @@ azdiskschedulerextender-container: azdiskschedulerextender
 
 .PHONY: azdiskschedulerextender-container-linux
 azdiskschedulerextender-container-linux:
-	docker buildx build . \
-		--pull \
-		--output=type=$(OUTPUT_TYPE) \
-		--platform="linux/$(ARCH)" \
-		--tag $(AZ_DISK_SCHEDULER_EXTENDER_IMAGE_TAG)-linux-$(ARCH) \
-		--file ./pkg/azdiskschedulerextender/Dockerfile \
-		--build-arg ARCH=${ARCH}
+	docker buildx build --pull --output=type=$(OUTPUT_TYPE) --platform="linux/$(ARCH)" \
+		-t $(AZ_DISK_SCHEDULER_EXTENDER_IMAGE_TAG)-linux-$(ARCH) -f ./pkg/azdiskschedulerextender/Dockerfile .
 
 .PHONY: azdiskschedulerextender-container-windows
 azdiskschedulerextender-container-windows:
-	docker buildx build . \
-		--pull \
-		--output=type=$(OUTPUT_TYPE) \
-		--platform="windows/$(ARCH)" \
-		--tag $(AZ_DISK_SCHEDULER_EXTENDER_IMAGE_TAG)-windows-$(OSVERSION)-$(ARCH) \
-		--file ./pkg/azdiskschedulerextender/Windows.Dockerfile \
-		--build-arg ARCH=${ARCH} \
-		--build-arg OSVERSION=$(OSVERSION)
+	docker buildx build --pull --output=type=$(OUTPUT_TYPE) --platform="windows/$(ARCH)" \
+		 -t $(AZ_DISK_SCHEDULER_EXTENDER_IMAGE_TAG)-windows-$(OSVERSION)-$(ARCH) --build-arg OSVERSION=$(OSVERSION) -f ./pkg/azdiskschedulerextender/Windows.Dockerfile .
 
-.PHONY: container-setup
-container-setup:
+.PHONY: azdiskschedulerextender-all
+azdiskschedulerextender-all: azdiskschedulerextender azdiskschedulerextender-windows
 	docker buildx rm container-builder || true
 	docker buildx create --use --name=container-builder
 ifeq ($(CLOUD), AzureStackCloud)
 	docker run --privileged --name buildx_buildkit_container-builder0 -d --mount type=bind,src=/etc/ssl/certs,dst=/etc/ssl/certs moby/buildkit:latest || true
 endif
-	# enable qemu for arm64 build
-	# https://github.com/docker/buildx/issues/464#issuecomment-741507760
-	docker run --privileged --rm tonistiigi/binfmt --uninstall qemu-aarch64
-	docker run --rm --privileged tonistiigi/binfmt --install all
-
-.PHONY: azdiskschedulerextender-all
-azdiskschedulerextender-all: azdiskschedulerextender-windows container-setup
-	for arch in $(ALL_ARCH.linux); do \
-		ARCH=$${arch} $(MAKE) azdiskschedulerextender; \
-		ARCH=$${arch} $(MAKE) azdiskschedulerextender-container-linux; \
-	done
+	$(MAKE) azdiskschedulerextender-container-linux
 	for osversion in $(ALL_OSVERSIONS.windows); do \
 		OSVERSION=$${osversion} $(MAKE) azdiskschedulerextender-container-windows; \
 	done
 	
 .PHONY: container-all
-container-all: azuredisk-windows container-setup
-	for arch in $(ALL_ARCH.linux); do \
-		ARCH=$${arch} $(MAKE) azuredisk; \
-		ARCH=$${arch} $(MAKE) container-linux; \
-	done
+container-all: azuredisk azuredisk-windows
+	docker buildx rm container-builder || true
+	docker buildx create --use --name=container-builder
+ifeq ($(CLOUD), AzureStackCloud)
+	docker run --privileged --name buildx_buildkit_container-builder0 -d --mount type=bind,src=/etc/ssl/certs,dst=/etc/ssl/certs moby/buildkit:latest || true
+endif
+	$(MAKE) container-linux
 	for osversion in $(ALL_OSVERSIONS.windows); do \
 		OSVERSION=$${osversion} $(MAKE) container-windows; \
 	done
@@ -331,14 +311,3 @@ create-metrics-svc:
 delete-metrics-svc:
 	kubectl delete -f deploy/example/metrics/csi-azuredisk-controller-svc.yaml --ignore-not-found
 
-.PHONY: e2e-test
-e2e-test:
-	if [ ! -z "$(EXTERNAL_E2E_TEST)" ]; then \
-		bash ./test/external-e2e/run.sh;\
-	else \
-		go test -v -timeout=0 ./test/e2e ${GINKGO_FLAGS};\
-	fi
-
-.PHONY: e2e-test-v2
-e2e-test-v2:
-	BUILD_V2=1 go test -v -timeout=0 -tags azurediskv2 ./test/e2e --temp-use-driver-v2 ${GINKGO_FLAGS}
