@@ -18,10 +18,13 @@ package testsuites
 
 import (
 	"sigs.k8s.io/azuredisk-csi-driver/test/e2e/driver"
+	"sigs.k8s.io/azuredisk-csi-driver/test/e2e/testsuites"
 
 	"github.com/onsi/ginkgo"
 	v1 "k8s.io/api/core/v1"
 	clientset "k8s.io/client-go/kubernetes"
+	"k8s.io/kubernetes/test/e2e/framework"
+	azDiskClientSet "sigs.k8s.io/azuredisk-csi-driver/pkg/apis/client/clientset/versioned"
 )
 
 // DynamicallyProvisionedCmdVolumeTest will provision required StorageClass(es), PVC(s) and Pod(s)
@@ -33,7 +36,7 @@ type DynamicallyProvisionedCmdVolumeTest struct {
 	StorageClassParameters map[string]string
 }
 
-func (t *DynamicallyProvisionedCmdVolumeTest) Run(client clientset.Interface, namespace *v1.Namespace, schedulerName string) {
+func (t *DynamicallyProvisionedCmdVolumeTest) Run(client clientset.Interface, namespace *v1.Namespace, azDiskClient *azDiskClientSet.Clientset, schedulerName string, isV2Driver bool) {
 	for _, pod := range t.Pods {
 		tpod, cleanup := pod.SetupWithDynamicVolumes(client, namespace, t.CSIDriver, t.StorageClassParameters, schedulerName)
 		// defer must be called here for resources not get removed before using them
@@ -46,5 +49,10 @@ func (t *DynamicallyProvisionedCmdVolumeTest) Run(client clientset.Interface, na
 		defer tpod.Cleanup()
 		ginkgo.By("checking that the pod's command exits with no error")
 		tpod.WaitForSuccess()
+
+		err := testsuites.ValidateAzVolumeAttachment(namespace, tpod, client, azDiskClient, t.StorageClassParameters, isV2Driver)
+		framework.ExpectNoError(err)
+		err = testsuites.ValidateAzVolume(namespace, tpod, client, azDiskClient, t.StorageClassParameters, isV2Driver)
+		framework.ExpectNoError(err)
 	}
 }

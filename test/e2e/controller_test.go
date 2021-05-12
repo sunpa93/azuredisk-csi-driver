@@ -19,19 +19,12 @@ package e2e
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/onsi/ginkgo"
-
-	v1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/test/e2e/framework"
-
 	azDiskClientSet "sigs.k8s.io/azuredisk-csi-driver/pkg/apis/client/clientset/versioned"
-	"sigs.k8s.io/azuredisk-csi-driver/test/e2e/driver"
-	"sigs.k8s.io/azuredisk-csi-driver/test/e2e/testsuites"
 )
 
 const (
@@ -45,59 +38,60 @@ var _ = ginkgo.Describe("Controller", func() {
 
 	//TODO add support for scheduler extender
 	ginkgo.Context("[multi-az]", func() {
-		defineTests(true)
+		// skip multi zone test for now
+		return
+		// TODO
+		//defineTests(true)
 	})
 })
 
+// TODO: migrate to integration test suite
 var defineTests = func(isMultiZone bool) {
 	f := framework.NewDefaultFramework("azuredisk")
 
 	var (
-		cs           clientset.Interface
-		ns           *v1.Namespace
+		cs clientset.Interface
+		// ns           *v1.Namespace
 		azDiskClient *azDiskClientSet.Clientset
-		testDriver   driver.PVTestDriver
-		err          error
+		// testDriver   driver.PVTestDriver
+		err error
 	)
 
-	volumeNameSeed := "test-volum-"
+	// volumeNameSeed := "test-volume-"
 
-	var setUpPod = func(maxShares int) {
-		pvcSize := "1Gi"
-		t := dynamicProvisioningTestSuite{}
-		pods := []testsuites.PodDetails{
-			testsuites.PodDetails{
-				Cmd: convertToPowershellorCmdCommandIfNecessary("echo 'hello world' > /mnt/test-1/data && grep 'hello world' /mnt/test-1/data"),
-				Volumes: t.normalizeVolumes([]testsuites.VolumeDetails{
-					{
-						ClaimSize: pvcSize,
-						MountOptions: []string{
-							"barrier=1",
-							"acl",
-						},
-						VolumeMount: testsuites.VolumeMountDetails{
-							NameGenerate:      volumeNameSeed,
-							MountPathGenerate: "/mnt/test-",
-						},
-					},
-				}, isMultiZone),
-				IsWindows: isWindowsCluster,
-			},
-		}
+	// var setUpPod = func(size, maxShares int) (*testsuites.TestPod, []func()) {
+	// 	pvcSize := strconv.Itoa(size)
+	// 	t := dynamicProvisioningTestSuite{}
+	// 	pod := testsuites.PodDetails{
+	// 		Cmd: convertToPowershellorCmdCommandIfNecessary("echo 'hello world' > /mnt/test-1/data && grep 'hello world' /mnt/test-1/data"),
+	// 		Volumes: t.normalizeVolumes([]testsuites.VolumeDetails{
+	// 			{
+	// 				ClaimSize: pvcSize + "Gi",
+	// 				MountOptions: []string{
+	// 					"barrier=1",
+	// 					"acl",
+	// 				},
+	// 				VolumeMount: testsuites.VolumeMountDetails{
+	// 					NameGenerate:      volumeNameSeed,
+	// 					MountPathGenerate: "/mnt/test-",
+	// 				},
+	// 			},
+	// 		}, isMultiZone),
+	// 		IsWindows: isWindowsCluster,
+	// 	}
+	// 	storageClassParameters := map[string]string{"skuName": "Premium_LRS", "maxShares": strconv.Itoa(maxShares)}
+	// 	tpod, cleanups := pod.SetupWithDynamicVolumes(cs, ns, testDriver, storageClassParameters, schedulerName)
+	// 	tpod.Create()
+	// 	tpod.WaitForSuccess()
 
-		test := testsuites.DynamicallyProvisionedCmdVolumeTest{
-			CSIDriver:              testDriver,
-			Pods:                   pods,
-			StorageClassParameters: map[string]string{"skuName": "Premium_LRS", "maxShares": strconv.Itoa(maxShares)},
-		}
+	// 	return tpod, cleanups
+	// }
 
-		test.Run(cs, ns, schedulerName)
-	}
+	// testDriver = driver.InitAzureDiskDriver()
 
-	testDriver = driver.InitAzureDiskDriver()
 	ginkgo.BeforeEach(func() {
 		cs = f.ClientSet
-		ns = f.Namespace
+		// ns = f.Namespace
 
 		azDiskClient, err = azDiskClientSet.NewForConfig(f.ClientConfig())
 		if err != nil {
@@ -141,84 +135,127 @@ var defineTests = func(isMultiZone bool) {
 			}
 		})
 	})
-	ginkgo.Context("AzVolumeAttachment", func() {
-		ginkgo.It("Should initialize AzVolumeAttachment object's status and append finalizer and create labels", func() {
-			skipIfUsingInTreeVolumePlugin()
-			skipIfNotUsingCSIDriverV2()
-			nodes := testsuites.ListNodeNames(cs)
-			if len(nodes) < 1 {
-				ginkgo.Skip("need at least 1 nodes to verify the test case. Current node count is %d", len(nodes))
-			}
-
-			setUpPod(1)
-
-			// Get AzVolumeAttachment with specified volume name
-			attachments, err := azDiskClient.DiskV1alpha1().AzVolumeAttachments(namespace).List(context.Background(), metav1.ListOptions{})
-			framework.ExpectNoError(err)
-
-			attachmentCount := 0
-
-			for _, attachment := range attachments.Items {
-				if strings.HasPrefix(attachment.Spec.UnderlyingVolume, volumeNameSeed) {
-					attachmentCount++
-					// confirm that the attachment's status has been initialized
-					framework.ExpectNotEqual(attachment.Status, nil)
-					// confirm that the attachment's finalizers have been properly added
-					framework.ExpectNotEqual(attachment.Finalizers, nil)
-					framework.ExpectEqual(len(attachment.Finalizers) > 0, true)
-					// confirm taht the attachments' labels have been properly added
-					framework.ExpectNotEqual(attachment.Labels, nil)
-					framework.ExpectEqual(len(attachment.Labels) > 0, true)
-				}
-			}
-
-			// confirm that 1 AzVolumeAttachment has been created
-			framework.ExpectEqual(attachmentCount == 1, true)
-		})
-	})
-
-	// 	ginkgo.It("Should delete AzVolumeAttachment object properly", func() {
+	// ginkgo.Context("AzVolumeAttachment", func() {
+	// 	ginkgo.It("Should initialize AzVolumeAttachment object's status and append finalizer and create labels", func() {
 	// 		skipIfUsingInTreeVolumePlugin()
 	// 		skipIfNotUsingCSIDriverV2()
 	// 		nodes := testsuites.ListNodeNames(cs)
-	// 		volName := "test-volume"
 	// 		if len(nodes) < 1 {
 	// 			ginkgo.Skip("need at least 1 nodes to verify the test case. Current node count is %d", len(nodes))
 	// 		}
-	// 		primaryNode := nodes[0]
-	// 		testAzAtt := testsuites.SetupTestAzVolumeAttachment(azDiskClient.DiskV1alpha1(), namespace, volName, primaryNode, 0)
-	// 		defer testAzAtt.Cleanup()
-	// 		att := testAzAtt.Create()
 
-	// 		err = testAzAtt.WaitForFinalizer(time.Duration(5) * time.Minute)
-	// 		framework.ExpectNoError(err)
-
-	// 		// Delete the underlying AzVolume so that a new AzVolumeAttachment to replace the deleted one doesn't get spawned
-	// 		err = azDiskClient.DiskV1alpha1().AzVolumes(namespace).Delete(context.Background(), volName, metav1.DeleteOptions{})
-	// 		framework.ExpectNoError(err)
-
-	// 		err = azDiskClient.DiskV1alpha1().AzVolumeAttachments(namespace).Delete(context.Background(), att.Name, metav1.DeleteOptions{})
-	// 		framework.ExpectNoError(err)
-
-	// 		err = testAzAtt.WaitForDelete(primaryNode, time.Duration(5)*time.Minute)
-	// 		framework.ExpectNoError(err)
-	// 	})
-
-	// 	ginkgo.It("Should create replica azVolumeAttachment object when maxShares > 1", func() {
-	// 		skipIfUsingInTreeVolumePlugin()
-	// 		skipIfNotUsingCSIDriverV2()
-	// 		nodes := testsuites.ListNodeNames(cs)
-	// 		if len(nodes) < 2 {
-	// 			ginkgo.Skip("need at least 2 nodes to verify the test case. Current node count is %d", len(nodes))
+	// 		tpod, cleanups := setUpPod(1, 1)
+	// 		for _, cleanup := range cleanups {
+	// 			defer cleanup()
 	// 		}
-	// 		testAzAtt := testsuites.SetupTestAzVolumeAttachment(azDiskClient.DiskV1alpha1(), namespace, "test-volume", nodes[0], 1)
-	// 		defer testAzAtt.Cleanup()
-	// 		_ = testAzAtt.Create()
-	// 		// check if the second attachment object was created and marked attached.
-	// 		err = testAzAtt.WaitForReplicas(1, time.Duration(5)*time.Minute)
+	// 		defer tpod.Cleanup()
+	// 		framework.ExpectNoError(err)
+	// 		pvc, err := cs.CoreV1().PersistentVolumeClaims(ns.Name).Get(context.Background(), tpod.GetPVCName(0), metav1.GetOptions{})
 	// 		framework.ExpectNoError(err)
 
+	// 		attachments, err := azDiskClient.DiskV1alpha1().AzVolumeAttachments(namespace).List(context.Background(), metav1.ListOptions{})
+	// 		framework.ExpectNoError(err)
+
+	// 		attachmentCount := 0
+	// 		for _, attachment := range attachments.Items {
+	// 			if strings.EqualFold(attachment.Spec.UnderlyingVolume, pvc.Spec.VolumeName) {
+	// 				attachmentCount++
+	// 				// confirm that the attachment's status has been initialized
+	// 				framework.ExpectNotEqual(attachment.Status, nil)
+	// 				// confirm that the attachment's finalizers have been properly added
+	// 				framework.ExpectNotEqual(attachment.Finalizers, nil)
+	// 				framework.ExpectEqual(len(attachment.Finalizers) > 0, true)
+	// 				// confirm taht the attachments' labels have been properly added
+	// 				framework.ExpectNotEqual(attachment.Labels, nil)
+	// 				framework.ExpectEqual(len(attachment.Labels) > 0, true)
+	// 			}
+	// 		}
+	// 		// confirm that 1 AzVolumeAttachment has been created
+	// 		framework.ExpectEqual(attachmentCount, 1)
 	// 	})
+	// })
+
+	// ginkgo.It("Should delete AzVolumeAttachment object properly", func() {
+	// 	skipIfUsingInTreeVolumePlugin()
+	// 	skipIfNotUsingCSIDriverV2()
+	// 	nodes := testsuites.ListNodeNames(cs)
+	// 	if len(nodes) < 1 {
+	// 		ginkgo.Skip("need at least 1 nodes to verify the test case. Current node count is %d", len(nodes))
+	// 	}
+	// 	tpod, cleanups := setUpPod(1, 1)
+	// 	// Get all PVCs in the generated namesapce
+	// 	pvc, err := cs.CoreV1().PersistentVolumeClaims(ns.Name).Get(context.Background(), tpod.GetPVCName(0), metav1.GetOptions{})
+	// 	framework.ExpectNoError(err)
+	// 	var azVolumeAttachment v1alpha1.AzVolumeAttachment
+	// 	// Get AzVolumeAttachment with specified volume name
+	// 	attachments, err := azDiskClient.DiskV1alpha1().AzVolumeAttachments(namespace).List(context.Background(), metav1.ListOptions{})
+	// 	framework.ExpectNoError(err)
+
+	// 	for _, attachment := range attachments.Items {
+	// 		if strings.EqualFold(attachment.Spec.UnderlyingVolume, pvc.Spec.VolumeName) {
+	// 			azVolumeAttachment = attachment
+	// 		}
+	// 	}
+
+	// 	tpod.Cleanup()
+	// 	// clean up so that azvolume and azvolumeattachment can be triggered its deletions
+	// 	for _, cleanup := range cleanups {
+	// 		cleanup()
+	// 	}
+
+	// 	conditionFunc := func() (bool, error) {
+	// 		_, err = azDiskClient.DiskV1alpha1().AzVolumeAttachments(namespace).Get(context.Background(), azVolumeAttachment.Name, metav1.GetOptions{})
+	// 		if err == nil {
+	// 			return false, nil
+	// 		}
+	// 		if errors.IsNotFound(err) {
+	// 			return true, nil
+	// 		}
+
+	// 		return false, err
+	// 	}
+
+	// 	err = wait.PollImmediate(time.Duration(15)*time.Second, time.Duration(5)*time.Minute, conditionFunc)
+	// 	framework.ExpectNoError(err)
+	// })
+
+	// ginkgo.It("Should create replica AzVolumeAttachment object when maxShares > 1", func() {
+	// 	skipIfUsingInTreeVolumePlugin()
+	// 	skipIfNotUsingCSIDriverV2()
+	// 	nodes := testsuites.ListNodeNames(cs)
+	// 	if len(nodes) < 2 {
+	// 		ginkgo.Skip("need at least 2 nodes to verify the test case. Current node count is %d", len(nodes))
+	// 	}
+
+	// 	tpod, cleanups := setUpPod(256, 2)
+	// 	for _, cleanup := range cleanups {
+	// 		defer cleanup()
+	// 	}
+	// 	defer tpod.Cleanup()
+
+	// 	// Get all PVCs in the generated namesapce
+	// 	pvc, err := cs.CoreV1().PersistentVolumeClaims(ns.Name).Get(context.Background(), tpod.GetPVCName(0), metav1.GetOptions{})
+	// 	framework.ExpectNoError(err)
+
+	// 	conditionFunc := func() (bool, error) {
+	// 		attachments, err := azDiskClient.DiskV1alpha1().AzVolumeAttachments(namespace).List(context.Background(), metav1.ListOptions{})
+	// 		if err != nil {
+	// 			return false, nil
+	// 		}
+
+	// 		replicaCount := 0
+	// 		for _, attachment := range attachments.Items {
+	// 			if attachment.Spec.UnderlyingVolume == pvc.Spec.VolumeName && attachment.Status != nil && attachment.Status.Role == v1alpha1.ReplicaRole {
+	// 				replicaCount++
+	// 			}
+	// 		}
+
+	// 		return replicaCount == 1, err
+	// 	}
+
+	// 	err = wait.PollImmediate(time.Duration(15)*time.Second, time.Duration(5)*time.Minute, conditionFunc)
+	// 	framework.ExpectNoError(err)
+	// })
 
 	// 	ginkgo.It("If failover happens, should turn replica to primary and create an additional replica for replacment", func() {
 	// 		skipIfUsingInTreeVolumePlugin()

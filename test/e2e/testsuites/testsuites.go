@@ -20,6 +20,8 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -50,10 +52,12 @@ import (
 	testutil "k8s.io/kubernetes/test/utils"
 	imageutils "k8s.io/kubernetes/test/utils/image"
 	"sigs.k8s.io/azuredisk-csi-driver/pkg/apis/azuredisk/v1alpha1"
+	azDiskClientSet "sigs.k8s.io/azuredisk-csi-driver/pkg/apis/client/clientset/versioned"
 	v1alpha1ClientSet "sigs.k8s.io/azuredisk-csi-driver/pkg/apis/client/clientset/versioned/typed/azuredisk/v1alpha1"
 	"sigs.k8s.io/azuredisk-csi-driver/pkg/azuredisk"
 	"sigs.k8s.io/azuredisk-csi-driver/pkg/azureutils"
 	controller "sigs.k8s.io/azuredisk-csi-driver/pkg/controller"
+	"sigs.k8s.io/azuredisk-csi-driver/test/e2e"
 )
 
 const (
@@ -859,6 +863,17 @@ func (t *TestPod) SetNodeUnschedulable(nodeName string, unschedulable bool) {
 	framework.ExpectNoError(err)
 }
 
+func (t *TestPod) GetNumPVC() int {
+	return len(t.pod.Spec.Volumes)
+}
+
+func (t *TestPod) GetPVCName(index int) string {
+	if len(t.pod.Spec.Volumes) <= index {
+		return ""
+	}
+	return t.pod.Spec.Volumes[index].PersistentVolumeClaim.ClaimName
+}
+
 func (t *TestPod) Cleanup() {
 	cleanupPodOrFail(t.client, t.pod.Name, t.namespace.Name)
 }
@@ -1311,4 +1326,97 @@ func (t *TestAzVolume) WaitForDelete(timeout time.Duration) error {
 		return false, nil
 	}
 	return wait.PollImmediate(time.Duration(15)*time.Second, timeout, conditionFunc)
+}
+
+func WaitForAttach(azDiskClient v1alpha1ClientSet.DiskV1alpha1Interface, volumeName string, role v1alpha1.Role, numAttachment int) error {
+	klog.Infof("Waiting for %d %v AzVolumeAttachment to be initialized for volume (%s)", numAttachment, role, volumeName)
+
+	conditionFunc := func() (bool, error) {
+		attachments, err := azDiskClient.AzVolumeAttachments(e2e.DiskDriverNamespace).List(context.Background(), metav1.ListOptions{})
+		if err != nil {
+			return false, err
+		}
+		attachmentCount := 0
+		for _, attachment := range attachments.Items {
+			if strings.EqualFold(attachment.Spec.UnderlyingVolume, volumeName) && attachment.Status != nil && attachment.Status.Role == role {
+				attachmentCount++
+				// confirm that the attachment's finalizers have been properly added
+				if attachment.Finalizers == nil || attachment.Labels == nil {
+					return false, nil
+				}
+			}
+		}
+		if attachmentCount != numAttachment {
+			return false, nil
+		}
+		return true, nil
+	}
+	return wait.PollImmediate(time.Duration(15)*time.Second, time.Duration(5)*time.Minute, conditionFunc)
+}
+
+func ValidateAzVolumeAttachment(namespace *v1.Namespace, tpod *TestPod, client clientset.Clientset, azDiskClient *azDiskClientSet.Clientset, storageClassParameters map[string]string, isV2Driver bool) error {
+	if isV2Driver {
+		numPVC := tpod.GetNumPVC()
+		for i := 0; i < numPVC; i++ {
+			pvc, err := client.CoreV1().PersistentVolumeClaims(namespace.Name).Get(context.TODO(), tpod.GetPVCName(i), metav1.GetOptions{})
+			framework.ExpectNoError(err)
+			err = WaitForAttach(azDiskClient.DiskV1alpha1(), pvc.Spec.VolumeName, v1alpha1.PrimaryRole, 1)
+			framework.ExpectNoError(err)
+			maxShares := 1
+			maxReplicaCount := 0
+			if maxSharesStr, ok := storageClassParameters["maxShares"]; ok {
+				maxShares, err = strconv.Atoi(maxSharesStr)
+				framework.ExpectNoError(err)
+			}
+			if maxReplicaCountStr, ok := storageClassParameters["maxMountReplicaCount"]; ok {
+				maxReplicaCount, err = strconv.Atoi(maxReplicaCountStr)
+				framework.ExpectNoError(err)
+			}
+			if maxReplicaCount > maxShares-1 {
+				maxReplicaCount = maxShares - 1
+			}
+			if err = WaitForAttach(azDiskClient.DiskV1alpha1(), pvc.Spec.VolumeName, v1alpha1.ReplicaRole, maxReplicaCount); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func ValidateAzVolume(namespace *v1.Namespace, tpod *TestPod, client clientset.Clientset, azDiskClient *azDiskClientSet.Clientset, storageClassParameters map[string]string, isV2Driver bool) error {
+	if isV2Driver {
+		numPVC := tpod.GetNumPVC()
+		for i := 0; i < numPVC; i++ {
+			pvc, err := client.CoreV1().PersistentVolumeClaims(namespace.Name).Get(context.TODO(), tpod.GetPVCName(0), metav1.GetOptions{})
+			framework.ExpectNoError(err)
+			maxShares := 1
+			maxReplicaCount := 0
+			if maxSharesStr, ok := storageClassParameters["maxShares"]; ok {
+				maxShares, err = strconv.Atoi(maxSharesStr)
+				framework.ExpectNoError(err)
+			}
+			if maxReplicaCountStr, ok := storageClassParameters["maxMountReplicaCount"]; ok {
+				maxReplicaCount, err = strconv.Atoi(maxReplicaCountStr)
+				framework.ExpectNoError(err)
+			}
+			if maxReplicaCount > maxShares-1 {
+				maxReplicaCount = maxShares - 1
+			}
+			// check if azVolume CRI has been properly created with properly populated fields
+			conditionFunc := func() (bool, error) {
+				azVolume, err := azDiskClient.DiskV1alpha1().AzVolumes(e2e.DiskDriverNamespace).Get(context.TODO(), pvc.Spec.VolumeName, metav1.GetOptions{})
+				if err != nil {
+					return false, err
+				}
+				if azVolume.Status == nil || azVolume.Spec.MaxMountReplicaCount != maxReplicaCount || azVolume.Finalizers == nil {
+					return false, err
+				}
+				return true, nil
+			}
+			if err = wait.PollImmediate(time.Duration(15)*time.Second, time.Duration(5)*time.Minute, conditionFunc); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

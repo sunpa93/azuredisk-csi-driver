@@ -35,6 +35,8 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	restclientset "k8s.io/client-go/rest"
 	"k8s.io/kubernetes/test/e2e/framework"
+
+	azDiskClientSet "sigs.k8s.io/azuredisk-csi-driver/pkg/apis/client/clientset/versioned"
 )
 
 var _ = ginkgo.Describe("Dynamic Provisioning", func() {
@@ -61,10 +63,11 @@ func (t *dynamicProvisioningTestSuite) defineTests(isMultiZone bool, schedulerNa
 	f := framework.NewDefaultFramework("azuredisk")
 
 	var (
-		cs          clientset.Interface
-		ns          *v1.Namespace
-		snapshotrcs restclientset.Interface
-		testDriver  driver.PVTestDriver
+		cs           clientset.Interface
+		ns           *v1.Namespace
+		azDiskClient *azDiskClientSet.Clientset
+		snapshotrcs  restclientset.Interface
+		testDriver   driver.PVTestDriver
 	)
 
 	ginkgo.BeforeEach(func() {
@@ -83,6 +86,13 @@ func (t *dynamicProvisioningTestSuite) defineTests(isMultiZone bool, schedulerNa
 		snapshotrcs, err = restClient(testsuites.SnapshotAPIGroup, testsuites.APIVersionv1beta1)
 		if err != nil {
 			ginkgo.Fail(fmt.Sprintf("could not get rest clientset: %v", err))
+		}
+
+		if isUsingCSIDriverV2 {
+			azDiskClient, err = azDiskClientSet.NewForConfig(f.ClientConfig())
+			if err != nil {
+				ginkgo.Fail(fmt.Sprintf("could not get azDiskClient: %v", err))
+			}
 		}
 
 		// Populate allowedTopologyValues from node labels fior the first time
@@ -141,7 +151,50 @@ func (t *dynamicProvisioningTestSuite) defineTests(isMultiZone bool, schedulerNa
 				"logicalSectorSize": "512",
 			}
 		}
-		test.Run(cs, ns, schedulerName)
+		test.Run(cs, ns, azDiskClient, schedulerName, isUsingCSIDriverV2)
+	})
+
+	ginkgo.It(fmt.Sprintf("should create a volume on demand with mount options with maxShares > 1 [kubernetes.io/azure-disk] [disk.csi.azure.com] [Windows] [%s]", schedulerName), func() {
+		pvcSize := "256Gi"
+		if isMultiZone {
+			pvcSize = "1000Gi"
+		}
+		pods := []testsuites.PodDetails{
+			{
+				Cmd: convertToPowershellorCmdCommandIfNecessary("echo 'hello world' > /mnt/test-1/data && grep 'hello world' /mnt/test-1/data"),
+				Volumes: t.normalizeVolumes([]testsuites.VolumeDetails{
+					{
+						ClaimSize: pvcSize,
+						MountOptions: []string{
+							"barrier=1",
+							"acl",
+						},
+						VolumeMount: testsuites.VolumeMountDetails{
+							NameGenerate:      "test-volume-",
+							MountPathGenerate: "/mnt/test-",
+						},
+					},
+				}, isMultiZone),
+				IsWindows: isWindowsCluster,
+			},
+		}
+		test := testsuites.DynamicallyProvisionedCmdVolumeTest{
+			CSIDriver:              testDriver,
+			Pods:                   pods,
+			StorageClassParameters: map[string]string{"skuName": "Standard_LRS"},
+		}
+
+		if isMultiZone && !isUsingInTreeVolumePlugin {
+			test.StorageClassParameters = map[string]string{
+				"skuName":           "UltraSSD_LRS",
+				"cachingmode":       "None",
+				"diskIopsReadWrite": "2000",
+				"diskMbpsReadWrite": "320",
+				"logicalSectorSize": "512",
+				"maxShares":         "2",
+			}
+		}
+		test.Run(cs, ns, azDiskClient, schedulerName, isUsingCSIDriverV2)
 	})
 
 	ginkgo.It(fmt.Sprintf("should receive FailedMount event with invalid mount options [kubernetes.io/azure-disk] [disk.csi.azure.com] [%s]", schedulerName), func() {
@@ -200,7 +253,7 @@ func (t *dynamicProvisioningTestSuite) defineTests(isMultiZone bool, schedulerNa
 			Pods:                   pods,
 			StorageClassParameters: map[string]string{"skuName": "Premium_LRS"},
 		}
-		test.Run(cs, ns, schedulerName)
+		test.Run(cs, ns, azDiskClient, schedulerName, isUsingCSIDriverV2)
 	})
 
 	// Track issue https://github.com/kubernetes/kubernetes/issues/70505
@@ -467,7 +520,7 @@ func (t *dynamicProvisioningTestSuite) defineTests(isMultiZone bool, schedulerNa
 		if isAzureStackCloud {
 			test.StorageClassParameters = map[string]string{"skuName": "Standard_LRS"}
 		}
-		test.Run(cs, ns, schedulerName)
+		test.Run(cs, ns, azDiskClient, schedulerName, isUsingCSIDriverV2)
 	})
 
 	ginkgo.It(fmt.Sprintf("should create a raw block volume and a filesystem volume on demand and bind to the same pod [kubernetes.io/azure-disk] [disk.csi.azure.com] [%s]", schedulerName), func() {
@@ -503,7 +556,7 @@ func (t *dynamicProvisioningTestSuite) defineTests(isMultiZone bool, schedulerNa
 			Pods:                   pods,
 			StorageClassParameters: map[string]string{"skuName": "Premium_LRS"},
 		}
-		test.Run(cs, ns, schedulerName)
+		test.Run(cs, ns, azDiskClient, schedulerName, isUsingCSIDriverV2)
 	})
 
 	ginkgo.It(fmt.Sprintf("should create a pod, write and read to it, take a volume snapshot, and create another pod from the snapshot [disk.csi.azure.com] [%s]", schedulerName), func() {

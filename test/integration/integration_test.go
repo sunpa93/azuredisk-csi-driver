@@ -101,3 +101,7 @@ func TestIntegrationOnAzurePublicCloud(t *testing.T) {
 		t.Fatalf("Integration test failed %v", err)
 	}
 }
+
+func TestAzVolumeAttachmentController(t *testing.T) {
+
+}

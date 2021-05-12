@@ -61,6 +61,7 @@ var (
 	isUsingOnlyDefaultScheduler = os.Getenv(useOnlyDefaultScheduler) != ""
 	isAzureStackCloud           = strings.EqualFold(os.Getenv(cloudNameEnvVar), "AZURESTACKCLOUD")
 	skipClusterBootstrap        = flag.Bool("skip-cluster-bootstrap", false, "flag to indicate that we can skip cluster bootstrap.")
+	DiskDriverNamespace         = "azure-disk-csi"
 )
 
 type testCmd struct {

@@ -65,7 +65,6 @@ spec:
             - nodeName
             - role
             - underlyingVolume
-            - volume_context
             - volume_id
             type: object
           status:
