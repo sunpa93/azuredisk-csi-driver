@@ -41,7 +41,6 @@ var _ = ginkgo.Describe("Controller", func() {
 	//TODO add support for scheduler extender
 	ginkgo.Context("[multi-az]", func() {
 		// skip multi zone test for now
-		return
 		// TODO
 		//defineTests(true)
 	})
