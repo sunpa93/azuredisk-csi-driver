@@ -868,7 +868,7 @@ func (t *TestPod) GetNumPVC() int {
 }
 
 func (t *TestPod) GetPVCName(index int) string {
-	if len(t.pod.Spec.Volumes) <= index {
+	if len(t.pod.Spec.Volumes) <= index || t.pod.Spec.Volumes[index].PersistentVolumeClaim == nil {
 		return ""
 	}
 	return t.pod.Spec.Volumes[index].PersistentVolumeClaim.ClaimName
@@ -1358,10 +1358,15 @@ func ValidateAzVolumeAttachment(namespace *v1.Namespace, tpod *TestPod, client c
 	if isV2Driver {
 		numPVC := tpod.GetNumPVC()
 		for i := 0; i < numPVC; i++ {
-			pvc, err := client.CoreV1().PersistentVolumeClaims(namespace.Name).Get(context.TODO(), tpod.GetPVCName(i), metav1.GetOptions{})
+			pvcName := tpod.GetPVCName(i)
+			if pvcName == "" {
+				continue
+			}
+			pvc, err := client.CoreV1().PersistentVolumeClaims(namespace.Name).Get(context.TODO(), pvcName, metav1.GetOptions{})
 			framework.ExpectNoError(err)
 			err = WaitForAttach(azDiskClient.DiskV1alpha1(), pvc.Spec.VolumeName, v1alpha1.PrimaryRole, 1)
 			framework.ExpectNoError(err)
+			klog.Infof("Primary AzVolumeAttachment found for volume (%s)", pvc.Spec.VolumeName)
 			maxShares := 1
 			maxReplicaCount := 0
 			if maxSharesStr, ok := storageClassParameters["maxShares"]; ok {
@@ -1387,7 +1392,11 @@ func ValidateAzVolume(namespace *v1.Namespace, tpod *TestPod, client clientset.I
 	if isV2Driver {
 		numPVC := tpod.GetNumPVC()
 		for i := 0; i < numPVC; i++ {
-			pvc, err := client.CoreV1().PersistentVolumeClaims(namespace.Name).Get(context.TODO(), tpod.GetPVCName(0), metav1.GetOptions{})
+			pvcName := tpod.GetPVCName(i)
+			if pvcName == "" {
+				continue
+			}
+			pvc, err := client.CoreV1().PersistentVolumeClaims(namespace.Name).Get(context.TODO(), pvcName, metav1.GetOptions{})
 			framework.ExpectNoError(err)
 			maxShares := 1
 			maxReplicaCount := 0
