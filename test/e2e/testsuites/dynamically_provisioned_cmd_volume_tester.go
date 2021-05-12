@@ -18,7 +18,6 @@ package testsuites
 
 import (
 	"sigs.k8s.io/azuredisk-csi-driver/test/e2e/driver"
-	"sigs.k8s.io/azuredisk-csi-driver/test/e2e/testsuites"
 
 	"github.com/onsi/ginkgo"
 	v1 "k8s.io/api/core/v1"
@@ -50,9 +49,9 @@ func (t *DynamicallyProvisionedCmdVolumeTest) Run(client clientset.Interface, na
 		ginkgo.By("checking that the pod's command exits with no error")
 		tpod.WaitForSuccess()
 
-		err := testsuites.ValidateAzVolumeAttachment(namespace, tpod, client, azDiskClient, t.StorageClassParameters, isV2Driver)
+		err := ValidateAzVolumeAttachment(namespace, tpod, client, azDiskClient, t.StorageClassParameters, isV2Driver)
 		framework.ExpectNoError(err)
-		err = testsuites.ValidateAzVolume(namespace, tpod, client, azDiskClient, t.StorageClassParameters, isV2Driver)
+		err = ValidateAzVolume(namespace, tpod, client, azDiskClient, t.StorageClassParameters, isV2Driver)
 		framework.ExpectNoError(err)
 	}
 }

@@ -57,7 +57,6 @@ import (
 	"sigs.k8s.io/azuredisk-csi-driver/pkg/azuredisk"
 	"sigs.k8s.io/azuredisk-csi-driver/pkg/azureutils"
 	controller "sigs.k8s.io/azuredisk-csi-driver/pkg/controller"
-	"sigs.k8s.io/azuredisk-csi-driver/test/e2e"
 )
 
 const (
@@ -67,9 +66,10 @@ const (
 	// Description that will printed during tests
 	failedConditionDescription = "Error status code"
 
-	poll            = 2 * time.Second
-	pollLongTimeout = 5 * time.Minute
-	pollTimeout     = 10 * time.Minute
+	poll                = 2 * time.Second
+	pollLongTimeout     = 5 * time.Minute
+	pollTimeout         = 10 * time.Minute
+	diskDriverNamespace = "azure-disk-csi"
 )
 
 type TestStorageClass struct {
@@ -1332,7 +1332,7 @@ func WaitForAttach(azDiskClient v1alpha1ClientSet.DiskV1alpha1Interface, volumeN
 	klog.Infof("Waiting for %d %v AzVolumeAttachment to be initialized for volume (%s)", numAttachment, role, volumeName)
 
 	conditionFunc := func() (bool, error) {
-		attachments, err := azDiskClient.AzVolumeAttachments(e2e.DiskDriverNamespace).List(context.Background(), metav1.ListOptions{})
+		attachments, err := azDiskClient.AzVolumeAttachments(diskDriverNamespace).List(context.Background(), metav1.ListOptions{})
 		if err != nil {
 			return false, err
 		}
@@ -1354,7 +1354,7 @@ func WaitForAttach(azDiskClient v1alpha1ClientSet.DiskV1alpha1Interface, volumeN
 	return wait.PollImmediate(time.Duration(15)*time.Second, time.Duration(5)*time.Minute, conditionFunc)
 }
 
-func ValidateAzVolumeAttachment(namespace *v1.Namespace, tpod *TestPod, client clientset.Clientset, azDiskClient *azDiskClientSet.Clientset, storageClassParameters map[string]string, isV2Driver bool) error {
+func ValidateAzVolumeAttachment(namespace *v1.Namespace, tpod *TestPod, client clientset.Interface, azDiskClient *azDiskClientSet.Clientset, storageClassParameters map[string]string, isV2Driver bool) error {
 	if isV2Driver {
 		numPVC := tpod.GetNumPVC()
 		for i := 0; i < numPVC; i++ {
@@ -1383,7 +1383,7 @@ func ValidateAzVolumeAttachment(namespace *v1.Namespace, tpod *TestPod, client c
 	return nil
 }
 
-func ValidateAzVolume(namespace *v1.Namespace, tpod *TestPod, client clientset.Clientset, azDiskClient *azDiskClientSet.Clientset, storageClassParameters map[string]string, isV2Driver bool) error {
+func ValidateAzVolume(namespace *v1.Namespace, tpod *TestPod, client clientset.Interface, azDiskClient *azDiskClientSet.Clientset, storageClassParameters map[string]string, isV2Driver bool) error {
 	if isV2Driver {
 		numPVC := tpod.GetNumPVC()
 		for i := 0; i < numPVC; i++ {
@@ -1404,7 +1404,7 @@ func ValidateAzVolume(namespace *v1.Namespace, tpod *TestPod, client clientset.C
 			}
 			// check if azVolume CRI has been properly created with properly populated fields
 			conditionFunc := func() (bool, error) {
-				azVolume, err := azDiskClient.DiskV1alpha1().AzVolumes(e2e.DiskDriverNamespace).Get(context.TODO(), pvc.Spec.VolumeName, metav1.GetOptions{})
+				azVolume, err := azDiskClient.DiskV1alpha1().AzVolumes(diskDriverNamespace).Get(context.TODO(), pvc.Spec.VolumeName, metav1.GetOptions{})
 				if err != nil {
 					return false, err
 				}
