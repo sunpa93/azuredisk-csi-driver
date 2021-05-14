@@ -290,7 +290,7 @@ func (d *DriverV2) StartControllersAndDieOnExit(ctx context.Context) {
 	azdReconciler.MonitorAndCleanUp(cleanUpCtx, wg)
 
 	klog.V(2).Info("Initializing AzVolumeAttachment controller")
-	azvaReconciler, err := controller.NewAzVolumeAttachmentController(mgr, d.crdProvisioner.GetDiskClientSetAddr(), d.objectNamespace, d.cloudProvisioner)
+	azvaReconciler, err := controller.NewAzVolumeAttachmentController(mgr, d.crdProvisioner.GetDiskClientSetAddr(), &d.kubeClient, d.objectNamespace, d.cloudProvisioner)
 	if err != nil {
 		klog.Errorf("Failed to initialize AzVolumeAttachmentController. Error: %v. Exiting application...", err)
 		os.Exit(1)
@@ -301,7 +301,7 @@ func (d *DriverV2) StartControllersAndDieOnExit(ctx context.Context) {
 	}
 
 	klog.V(2).Info("Initializing AzVolume controller")
-	azvReconciler, err := controller.NewAzVolumeController(mgr, d.crdProvisioner.GetDiskClientSetAddr(), d.objectNamespace, d.cloudProvisioner)
+	azvReconciler, err := controller.NewAzVolumeController(mgr, d.crdProvisioner.GetDiskClientSetAddr(), &d.kubeClient, d.objectNamespace, d.cloudProvisioner)
 	if err != nil {
 		klog.Errorf("Failed to initialize AzVolumeController. Error: %v. Exiting application...", err)
 		os.Exit(1)

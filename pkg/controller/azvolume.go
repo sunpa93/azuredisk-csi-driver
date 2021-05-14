@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/types"
+	kubeClientSet "k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/azuredisk-csi-driver/pkg/apis/azuredisk/v1alpha1"
 	azVolumeClientSet "sigs.k8s.io/azuredisk-csi-driver/pkg/apis/client/clientset/versioned"
@@ -49,14 +50,20 @@ import (
 type ReconcileAzVolume struct {
 	client           client.Client
 	azVolumeClient   azVolumeClientSet.Interface
+	kubeClient       kubeClientSet.Interface
 	namespace        string
 	cloudProvisioner CloudProvisioner
+	isInCleanUp      bool
 }
 
 // Implement reconcile.Reconciler so the controller can reconcile objects
 var _ reconcile.Reconciler = &ReconcileAzVolume{}
 
 func (r *ReconcileAzVolume) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
+	// Don't reconcile when in clean up
+	if r.isInCleanUp {
+		return reconcile.Result{}, nil
+	}
 	var azVolume v1alpha1.AzVolume
 
 	err := r.client.Get(ctx, request.NamespacedName, &azVolume)
@@ -208,7 +215,7 @@ func (r *ReconcileAzVolume) updateStatus(ctx context.Context, volumeName string,
 	}
 
 	if isDeleted {
-		if err := r.deleteFinalizer(ctx, volumeName); err != nil {
+		if err := r.deleteFinalizer(ctx, volumeName, azureutils.AzVolumeFinalizer); err != nil {
 			klog.Errorf("failed to delete finalizer %s for azVolume %s: %v", azureutils.AzVolumeFinalizer, azVolume.Name, err)
 			return err
 		}
@@ -291,25 +298,80 @@ func (r *ReconcileAzVolume) deleteVolume(ctx context.Context, azVolume *v1alpha1
 	return err
 }
 
+func (r *ReconcileAzVolume) recoverAzVolumes(ctx context.Context) error {
+	// Get PV list and create AzVolume for PV with azuredisk CSI spec
+	pvs, err := r.kubeClient.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		klog.Errorf("failed to get PV list: %v", err)
+	}
+
+	for _, pv := range pvs.Items {
+		if pv.Spec.CSI != nil && pv.Spec.CSI.Driver == azureutils.DriverName {
+			diskName, err := azureutils.GetDiskNameFromAzureManagedDiskURI(pv.Spec.CSI.VolumeHandle)
+			if err != nil {
+				klog.Warningf("failed to extract diskName from volume handle (%s): %v", pv.Spec.CSI.VolumeHandle, err)
+				continue
+			}
+			klog.Infof("Recovering AzVolume (%s)", diskName)
+			// TODO Create AzVolume CRI with fields properly filled
+			/*
+				if _, err := r.azVolumeClient.DiskV1alpha1().AzVolumes(r.namespace).Create(ctx, &v1alpha1.AzVolume{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: diskName,
+						Finalizers: []string{azureutils.AzVolumeFinalizer},
+					}
+					Spec:   v1alpha1.AzVolumeSpec{
+					},
+					Status: &v1alpha1.AzVolumeStatus{},
+				}, metav1.CreateOptions{}); err != nil {
+					klog.Errorf("failed to recover AzVolume (%s): %v", diskName, err)
+				}
+			*/
+		}
+	}
+	return nil
+}
+
 func (r *ReconcileAzVolume) RecoverAndMonitor(ctx context.Context, wg *sync.WaitGroup) error {
-	// TODO add recover function for AzVolume
+	// recover CRI if possible
+	// TODO add retry logic
+	_ = r.recoverAzVolumes(ctx)
 	// start a separate goroutine to monitor context cancellation. clean up upon cancellation
 	wg.Add(1)
 	go func(wg *sync.WaitGroup, ctx context.Context) {
 		defer wg.Done()
 		<-ctx.Done()
 		// clean up
-		/*
-			TODO
-			How should the AzVolume controller distinguish deletion of AzVolume triggered by 1) context cancellation and 2) controllerserver delete volume
-		*/
+		r.isInCleanUp = true
+		r.cleanUpUponCancel(context.TODO())
+
 	}(wg, ctx)
 
 	return nil
 }
 
-func NewAzVolumeController(mgr manager.Manager, azVolumeClient *azVolumeClientSet.Interface, namespace string, cloudProvisioner CloudProvisioner) (*ReconcileAzVolume, error) {
-	reconciler := ReconcileAzVolume{client: mgr.GetClient(), azVolumeClient: *azVolumeClient, namespace: namespace, cloudProvisioner: cloudProvisioner}
+func (r *ReconcileAzVolume) cleanUpUponCancel(ctx context.Context) {
+	var azVolumes v1alpha1.AzVolumeList
+	if err := r.client.List(ctx, &azVolumes, &client.ListOptions{}); err != nil {
+		klog.Warningf("failed to get AzVolume list: %v", err)
+		return
+	}
+	for _, azVolume := range azVolumes.Items {
+		if err := r.deleteFinalizer(ctx, azVolume.Name, azureutils.AzVolumeFinalizer, AzVolumeAttachmentFinalizer); err != nil {
+			klog.Warningf("failed to remove finalizer from AzVolume (%s): %v", azVolume.Name, err)
+		}
+	}
+}
+
+func NewAzVolumeController(mgr manager.Manager, azVolumeClient *azVolumeClientSet.Interface, kubeClient *kubeClientSet.Interface, namespace string, cloudProvisioner CloudProvisioner) (*ReconcileAzVolume, error) {
+	reconciler := ReconcileAzVolume{
+		client:           mgr.GetClient(),
+		azVolumeClient:   *azVolumeClient,
+		kubeClient:       *kubeClient,
+		namespace:        namespace,
+		cloudProvisioner: cloudProvisioner,
+		isInCleanUp:      false,
+	}
 	logger := mgr.GetLogger().WithValues("controller", "azvolume")
 
 	c, err := controller.New("azvolume-controller", mgr, controller.Options{
@@ -380,7 +442,7 @@ func (r *ReconcileAzVolume) initializeMeta(ctx context.Context, volumeName strin
 	return nil
 }
 
-func (r *ReconcileAzVolume) deleteFinalizer(ctx context.Context, volumeName string) error {
+func (r *ReconcileAzVolume) deleteFinalizer(ctx context.Context, volumeName string, finalizersToDelete ...string) error {
 	var azVolume v1alpha1.AzVolume
 	if err := r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: volumeName}, &azVolume); err != nil {
 		klog.Errorf("failed to get AzVolume (%s): %v", volumeName, err)
@@ -392,11 +454,13 @@ func (r *ReconcileAzVolume) deleteFinalizer(ctx context.Context, volumeName stri
 	}
 
 	finalizers := []string{}
-	for _, finalizer := range updated.ObjectMeta.Finalizers {
-		if finalizer == azureutils.AzVolumeFinalizer {
-			continue
+	for _, finalizerToDelete := range finalizersToDelete {
+		for _, finalizer := range updated.ObjectMeta.Finalizers {
+			if finalizer == finalizerToDelete {
+				continue
+			}
+			finalizers = append(finalizers, finalizer)
 		}
-		finalizers = append(finalizers, finalizer)
 	}
 	updated.ObjectMeta.Finalizers = finalizers
 	if err := r.client.Update(ctx, updated, &client.UpdateOptions{}); err != nil {
