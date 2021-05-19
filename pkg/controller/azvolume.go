@@ -252,7 +252,7 @@ func (r *ReconcileAzVolume) updateStatus(ctx context.Context, volumeName string,
 	return nil
 }
 
-func (r *reconcileAzVolume) updateStatusWithError(ctx context.Context, volumeName string, err error) error {
+func (r *ReconcileAzVolume) updateStatusWithError(ctx context.Context, volumeName string, err error) error {
 	var azVolume v1alpha1.AzVolume
 	if err := r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: volumeName}, &azVolume); err != nil {
 		klog.Errorf("failed to get AzVolume (%s): %v", volumeName, err)
