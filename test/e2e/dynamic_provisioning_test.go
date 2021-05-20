@@ -181,7 +181,7 @@ func (t *dynamicProvisioningTestSuite) defineTests(isMultiZone bool, schedulerNa
 		test := testsuites.DynamicallyProvisionedCmdVolumeTest{
 			CSIDriver:              testDriver,
 			Pods:                   pods,
-			StorageClassParameters: map[string]string{"skuName": "Standard_LRS"},
+			StorageClassParameters: map[string]string{"skuName": "Standard_LRS", "maxShares": "2"},
 		}
 
 		if isMultiZone && !isUsingInTreeVolumePlugin {
@@ -283,7 +283,7 @@ func (t *dynamicProvisioningTestSuite) defineTests(isMultiZone bool, schedulerNa
 		if isAzureStackCloud {
 			test.StorageClassParameters = map[string]string{"skuName": "Standard_LRS"}
 		}
-		test.Run(cs, ns, schedulerName)
+		test.Run(cs, ns, azDiskClient, schedulerName, isUsingCSIDriverV2)
 	})
 
 	ginkgo.It(fmt.Sprintf("should create multiple PV objects, bind to PVCs and attach all to different pods on the same node [kubernetes.io/azure-disk] [disk.csi.azure.com] [Windows] [%s]", schedulerName), func() {
@@ -337,7 +337,7 @@ func (t *dynamicProvisioningTestSuite) defineTests(isMultiZone bool, schedulerNa
 			ColocatePods:           true,
 			StorageClassParameters: map[string]string{"skuName": "Premium_LRS"},
 		}
-		test.Run(cs, ns, schedulerName)
+		test.Run(cs, ns, azDiskClient, schedulerName, isUsingCSIDriverV2)
 	})
 
 	ginkgo.It(fmt.Sprintf("should create a deployment object, write and read to it, delete the pod and write and read to it again [kubernetes.io/azure-disk] [disk.csi.azure.com] [Windows] [%s]", schedulerName), func() {
@@ -441,7 +441,8 @@ func (t *dynamicProvisioningTestSuite) defineTests(isMultiZone bool, schedulerNa
 				"fsType":  "xfs",
 			},
 		}
-		test.Run(cs, ns, schedulerName)
+		test.Run(cs, ns, azDiskClient, schedulerName, isUsingCSIDriverV2)
+
 	})
 
 	ginkgo.It(fmt.Sprintf("should clone a volume of larger size than the source volume and make sure the filesystem is appropriately adjusted [disk.csi.azure.com] [%s]", schedulerName), func() {
@@ -476,7 +477,7 @@ func (t *dynamicProvisioningTestSuite) defineTests(isMultiZone bool, schedulerNa
 				"fsType":  "xfs",
 			},
 		}
-		test.Run(cs, ns, schedulerName)
+		test.Run(cs, ns, azDiskClient, schedulerName, isUsingCSIDriverV2)
 	})
 
 	ginkgo.It(fmt.Sprintf("should create multiple PV objects, bind to PVCs and attach all to a single pod [kubernetes.io/azure-disk] [disk.csi.azure.com] [Windows] [%s]", schedulerName), func() {
@@ -589,7 +590,7 @@ func (t *dynamicProvisioningTestSuite) defineTests(isMultiZone bool, schedulerNa
 		if isAzureStackCloud {
 			test.StorageClassParameters = map[string]string{"skuName": "Standard_LRS"}
 		}
-		test.Run(cs, snapshotrcs, ns, schedulerName)
+		test.Run(cs, snapshotrcs, ns, azDiskClient, schedulerName, isUsingCSIDriverV2)
 	})
 
 	ginkgo.It(fmt.Sprintf("should create a pod, write to its pv, take a volume snapshot, overwrite data in original pv, create another pod from the snapshot, and read unaltered original data from original pv[disk.csi.azure.com] [%s]", schedulerName), func() {
@@ -629,7 +630,7 @@ func (t *dynamicProvisioningTestSuite) defineTests(isMultiZone bool, schedulerNa
 		if isAzureStackCloud {
 			test.StorageClassParameters = map[string]string{"skuName": "Standard_LRS"}
 		}
-		test.Run(cs, snapshotrcs, ns, schedulerName)
+		test.Run(cs, snapshotrcs, ns, azDiskClient, schedulerName, isUsingCSIDriverV2)
 	})
 
 	ginkgo.It(fmt.Sprintf("should create a pod with multiple volumes [kubernetes.io/azure-disk] [disk.csi.azure.com] [Windows] [%s]", schedulerName), func() {

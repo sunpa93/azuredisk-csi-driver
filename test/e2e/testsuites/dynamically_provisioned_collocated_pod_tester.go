@@ -17,11 +17,13 @@ limitations under the License.
 package testsuites
 
 import (
+	azDiskClientSet "sigs.k8s.io/azuredisk-csi-driver/pkg/apis/client/clientset/versioned"
 	"sigs.k8s.io/azuredisk-csi-driver/test/e2e/driver"
 
 	"github.com/onsi/ginkgo"
 	v1 "k8s.io/api/core/v1"
 	clientset "k8s.io/client-go/kubernetes"
+	"k8s.io/kubernetes/test/e2e/framework"
 )
 
 // DynamicallyProvisionedCollocatedPodTest will provision required StorageClass(es), PVC(s) and Pod(s)
@@ -34,7 +36,7 @@ type DynamicallyProvisionedCollocatedPodTest struct {
 	StorageClassParameters map[string]string
 }
 
-func (t *DynamicallyProvisionedCollocatedPodTest) Run(client clientset.Interface, namespace *v1.Namespace, schedulerName string) {
+func (t *DynamicallyProvisionedCollocatedPodTest) Run(client clientset.Interface, namespace *v1.Namespace, azDiskClient *azDiskClientSet.Clientset, schedulerName string, isUsingCSIDriverV2 bool) {
 	nodeName := ""
 	for _, pod := range t.Pods {
 		tpod, cleanup := pod.SetupWithDynamicVolumes(client, namespace, t.CSIDriver, t.StorageClassParameters, schedulerName)
@@ -53,5 +55,12 @@ func (t *DynamicallyProvisionedCollocatedPodTest) Run(client clientset.Interface
 		ginkgo.By("checking that the pod is running")
 		tpod.WaitForRunning()
 		nodeName = tpod.pod.Spec.NodeName
+
+		if isUsingCSIDriverV2 {
+			err := ValidateAzVolumeAttachment(namespace, tpod, client, azDiskClient, t.StorageClassParameters)
+			framework.ExpectNoError(err)
+			err = ValidateAzVolume(namespace, tpod, client, azDiskClient, t.StorageClassParameters)
+			framework.ExpectNoError(err)
+		}
 	}
 }

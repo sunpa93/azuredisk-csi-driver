@@ -19,6 +19,7 @@ package testsuites
 import (
 	"fmt"
 
+	azDiskClientSet "sigs.k8s.io/azuredisk-csi-driver/pkg/apis/client/clientset/versioned"
 	"sigs.k8s.io/azuredisk-csi-driver/test/e2e/driver"
 
 	"github.com/onsi/ginkgo"
@@ -37,7 +38,7 @@ type DynamicallyProvisionedReadOnlyVolumeTest struct {
 	StorageClassParameters map[string]string
 }
 
-func (t *DynamicallyProvisionedReadOnlyVolumeTest) Run(client clientset.Interface, namespace *v1.Namespace, schedulerName string) {
+func (t *DynamicallyProvisionedReadOnlyVolumeTest) Run(client clientset.Interface, namespace *v1.Namespace, azDiskClient *azDiskClientSet.Clientset, schedulerName string, isUsingCSIDriverV2 bool) {
 	for _, pod := range t.Pods {
 		expectedReadOnlyLog := "Read-only file system"
 		if pod.IsWindows {
@@ -58,5 +59,12 @@ func (t *DynamicallyProvisionedReadOnlyVolumeTest) Run(client clientset.Interfac
 		body, err := tpod.Logs()
 		framework.ExpectNoError(err, fmt.Sprintf("Error getting logs for pod %s: %v", tpod.pod.Name, err))
 		gomega.Expect(string(body)).To(gomega.ContainSubstring(expectedReadOnlyLog))
+
+		if isUsingCSIDriverV2 {
+			err := ValidateAzVolumeAttachment(namespace, tpod, client, azDiskClient, t.StorageClassParameters)
+			framework.ExpectNoError(err)
+			err = ValidateAzVolume(namespace, tpod, client, azDiskClient, t.StorageClassParameters)
+			framework.ExpectNoError(err)
+		}
 	}
 }

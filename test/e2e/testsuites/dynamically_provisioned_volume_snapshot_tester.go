@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"strings"
 
+	azDiskClientSet "sigs.k8s.io/azuredisk-csi-driver/pkg/apis/client/clientset/versioned"
 	"sigs.k8s.io/azuredisk-csi-driver/test/e2e/driver"
 	"sigs.k8s.io/azuredisk-csi-driver/test/utils/azure"
 	"sigs.k8s.io/azuredisk-csi-driver/test/utils/credentials"
@@ -50,7 +51,7 @@ type DynamicallyProvisionedVolumeSnapshotTest struct {
 	StorageClassParameters map[string]string
 }
 
-func (t *DynamicallyProvisionedVolumeSnapshotTest) Run(client clientset.Interface, restclient restclientset.Interface, namespace *v1.Namespace, schedulerName string) {
+func (t *DynamicallyProvisionedVolumeSnapshotTest) Run(client clientset.Interface, restclient restclientset.Interface, namespace *v1.Namespace, azDiskClient *azDiskClientSet.Clientset, schedulerName string, isUsingCSIDriverV2 bool) {
 	tpod := NewTestPod(client, namespace, t.Pod.Cmd, schedulerName, t.Pod.IsWindows)
 	volume := t.Pod.Volumes[0]
 	tpvc, pvcCleanup := volume.SetupDynamicPersistentVolumeClaim(client, namespace, t.CSIDriver, t.StorageClassParameters)
@@ -134,4 +135,10 @@ func (t *DynamicallyProvisionedVolumeSnapshotTest) Run(client clientset.Interfac
 	ginkgo.By("checking that the pod's command exits with no error")
 	tPodWithSnapshot.WaitForSuccess()
 
+	if isUsingCSIDriverV2 {
+		err := ValidateAzVolumeAttachment(namespace, tpod, client, azDiskClient, t.StorageClassParameters)
+		framework.ExpectNoError(err)
+		err = ValidateAzVolume(namespace, tpod, client, azDiskClient, t.StorageClassParameters)
+		framework.ExpectNoError(err)
+	}
 }

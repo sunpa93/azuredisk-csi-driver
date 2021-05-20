@@ -35,7 +35,7 @@ type DynamicallyProvisionedCmdVolumeTest struct {
 	StorageClassParameters map[string]string
 }
 
-func (t *DynamicallyProvisionedCmdVolumeTest) Run(client clientset.Interface, namespace *v1.Namespace, azDiskClient *azDiskClientSet.Clientset, schedulerName string, isV2Driver bool) {
+func (t *DynamicallyProvisionedCmdVolumeTest) Run(client clientset.Interface, namespace *v1.Namespace, azDiskClient *azDiskClientSet.Clientset, schedulerName string, isUsingCSIDriverV2 bool) {
 	for _, pod := range t.Pods {
 		tpod, cleanup := pod.SetupWithDynamicVolumes(client, namespace, t.CSIDriver, t.StorageClassParameters, schedulerName)
 		// defer must be called here for resources not get removed before using them
@@ -49,9 +49,11 @@ func (t *DynamicallyProvisionedCmdVolumeTest) Run(client clientset.Interface, na
 		ginkgo.By("checking that the pod's command exits with no error")
 		tpod.WaitForSuccess()
 
-		err := ValidateAzVolumeAttachment(namespace, tpod, client, azDiskClient, t.StorageClassParameters, isV2Driver)
-		framework.ExpectNoError(err)
-		err = ValidateAzVolume(namespace, tpod, client, azDiskClient, t.StorageClassParameters, isV2Driver)
-		framework.ExpectNoError(err)
+		if isUsingCSIDriverV2 {
+			err := ValidateAzVolumeAttachment(namespace, tpod, client, azDiskClient, t.StorageClassParameters)
+			framework.ExpectNoError(err)
+			err = ValidateAzVolume(namespace, tpod, client, azDiskClient, t.StorageClassParameters)
+			framework.ExpectNoError(err)
+		}
 	}
 }
