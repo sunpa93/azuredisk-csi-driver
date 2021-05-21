@@ -345,7 +345,7 @@ func (r *ReconcileAzVolumeAttachment) syncVolume(ctx context.Context, volume str
 
 	// if there is no AzVolumeAttachment object for the specified underlying volume, remove AzVolumeAttachment finalizer from AzVolume
 	if currentAttachmentCount == 0 {
-		if err := r.DeleteFinalizerFromAzVolume(ctx, azVolume.Name); err != nil {
+		if err := r.deleteFinalizerFromAzVolume(ctx, azVolume.Name); err != nil {
 			return err
 		}
 	}
