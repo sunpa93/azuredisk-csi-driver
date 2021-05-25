@@ -21,11 +21,10 @@ package azuredisk
 import (
 	"context"
 	"flag"
+	"fmt"
+	"net"
 	"os"
-	"os/signal"
 	"strings"
-	"sync"
-	"syscall"
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -67,6 +66,11 @@ const OutputCallDepth = 6
 // DefaultPrefixLength is the length of the log prefix that we have to strip out
 // when logging klogv1 to klogv2
 const DefaultPrefixLength = 30
+
+// CleanUpPort is used by preStop hook, for sending to the running controller a clean up signal
+// before its SIGTERMed
+const cleanUpPort = "3333"
+const cleanUpHost = "localhost"
 
 // DriverV2 implements all interfaces of CSI drivers
 type DriverV2 struct {
@@ -268,26 +272,31 @@ func (d *DriverV2) StartControllersAndDieOnExit(ctx context.Context) {
 
 	cleanUpCtx, cleanUpCancel := context.WithCancel(ctx)
 	defer cleanUpCancel()
-	c := make(chan os.Signal, 2)
-	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
+
+	var conn net.Conn
+	cleanUpAddress := fmt.Sprintf("%s:%s", cleanUpHost, cleanUpPort)
+	listen, err := net.Listen("tcp", cleanUpAddress)
+	if err != nil {
+		klog.Errorf("failed to listen to clean up ping: %v", err)
+		os.Exit(1)
+	}
+	defer listen.Close()
+	klog.Infof("Listening to clean up signal on %s", cleanUpAddress)
+
 	go func(cleanUpCancel context.CancelFunc) {
-		<-c
+		conn, _ = listen.Accept()
+		klog.Infof("Received a clean up signal", cleanUpAddress)
 		cleanUpCancel()
 	}(cleanUpCancel)
-
-	// set waitGroup for cleanup goroutines
-	wg := &sync.WaitGroup{}
 
 	// Setup a new controller to clean-up AzDriverNodes
 	// objects for the nodes which get deleted
 	klog.V(2).Info("Initializing AzDriverNode controller")
-	azdReconciler, err := controller.NewAzDriverNodeController(mgr, d.crdProvisioner.GetDiskClientSetAddr(), d.objectNamespace)
+	_, err = controller.NewAzDriverNodeController(mgr, d.crdProvisioner.GetDiskClientSetAddr(), d.objectNamespace)
 	if err != nil {
 		klog.Errorf("Failed to initialize AzDriverNodeController. Error: %v. Exiting application...", err)
 		os.Exit(1)
 	}
-	// start monitoring context cancellation and clean up upon exit
-	azdReconciler.MonitorAndCleanUp(cleanUpCtx, wg)
 
 	klog.V(2).Info("Initializing AzVolumeAttachment controller")
 	azvaReconciler, err := controller.NewAzVolumeAttachmentController(mgr, d.crdProvisioner.GetDiskClientSetAddr(), &d.kubeClient, d.objectNamespace, d.cloudProvisioner)
@@ -296,7 +305,7 @@ func (d *DriverV2) StartControllersAndDieOnExit(ctx context.Context) {
 		os.Exit(1)
 	}
 	// recover lost states if necessary and start monitoring context cancellation in order to clean up when necessary
-	if err := azvaReconciler.RecoverAndMonitor(cleanUpCtx, wg); err != nil {
+	if err := azvaReconciler.Recover(cleanUpCtx); err != nil {
 		klog.Warningf("Failed to recover AzVolumeAttachments: %v.", err)
 	}
 
@@ -307,7 +316,7 @@ func (d *DriverV2) StartControllersAndDieOnExit(ctx context.Context) {
 		os.Exit(1)
 	}
 	// recover lost states if necessary and start monitorting context cancellation in order to clean up when necessary
-	if err := azvReconciler.RecoverAndMonitor(cleanUpCtx, wg); err != nil {
+	if err := azvReconciler.Recover(cleanUpCtx); err != nil {
 		klog.Warningf("Failed to recover AzVolume: %v", err)
 	}
 
@@ -327,11 +336,16 @@ func (d *DriverV2) StartControllersAndDieOnExit(ctx context.Context) {
 
 	mgrCtx, mgrCancel := context.WithCancel(ctx)
 	// start goroutine to wait for all clean ups to be completed before cancelling context for the controller manager
-	go func(wg *sync.WaitGroup, mgrCancel context.CancelFunc) {
-		wg.Wait()
+	go func(cleanUpCtx context.Context, mgrCancel context.CancelFunc) {
+		<-cleanUpCtx.Done()
+		azvaReconciler.CleanUpUponCancel(context.TODO())
+		azvReconciler.CleanUpUponCancel(context.TODO())
 		klog.Infof("Finished cleaning up all CRIs for azuredisk driver. Now shutting down the controller manager...")
 		mgrCancel()
-	}(wg, mgrCancel)
+		if conn != nil {
+			conn.Close()
+		}
+	}(cleanUpCtx, mgrCancel)
 
 	klog.V(2).Info("Starting controller manager")
 	if err := mgr.Start(mgrCtx); err != nil {

@@ -21,6 +21,7 @@ import (
 	"os"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -34,6 +35,7 @@ import (
 	api "k8s.io/kubernetes/pkg/apis/core"
 	"k8s.io/kubernetes/pkg/volume/util"
 
+	"sigs.k8s.io/azuredisk-csi-driver/pkg/apis/azuredisk/v1alpha1"
 	azDiskClientSet "sigs.k8s.io/azuredisk-csi-driver/pkg/apis/client/clientset/versioned"
 	azure "sigs.k8s.io/cloud-provider-azure/pkg/provider"
 )
@@ -95,6 +97,9 @@ const (
 	// CRDs specific constants
 	PartitionLabel                   = "azdrivernodes.disk.csi.azure.com/partition"
 	AzVolumeFinalizer                = "disk.csi.azure.com/azvolume-finalizer"
+	// ControllerFinalizer is a finalizer added to the pod running Azuredisk driver controller
+	// to prevent the pod deletion until clean up is completed
+	ControllerFinalizer                = "disk.csi.azure.com/azuredisk-finalizer"
 	VolumeAttachmentExistsAnnotation = "disk.csi.azure.com/volume-attachment"
 
 	// ZRS specific constants
@@ -310,4 +315,36 @@ func checkDiskName(diskName string) bool {
 	}
 
 	return true
+}
+
+func GetMaxSharesAndMaxMountReplicaCount(parameters map[string]string) (int, int) {
+	maxShares := 1
+	maxMountReplicaCount := 0
+	for param, value := range parameters {
+		if strings.EqualFold(param, MaxSharesField) {
+			parsed, err := strconv.Atoi(value)
+			if err != nil {
+				klog.Warningf("failed to parse maxShares value (%s) to int, defaulting to 1: %v", value, err)
+			} else {
+				maxShares = parsed
+			}
+		} else if strings.EqualFold(param, MaxMountReplicaCountField) {
+			parsed, err := strconv.Atoi(value)
+			if err != nil {
+				klog.Warningf("failed to parse maxMountReplica value (%s) to int, defaulting to 0: %v", value, err)
+			} else {
+				maxMountReplicaCount = parsed
+			}
+		}
+	}
+
+	if maxShares-1 < maxMountReplicaCount {
+		klog.Warningf("maxMountReplicaCount cannot be larger than maxShares - 1: defaulting to maxShares - 1")
+		maxMountReplicaCount = maxShares - 1
+	}
+	return maxShares, maxMountReplicaCount
+}
+
+func GetAzVolumePhase(phase v1.PersistentVolumePhase) v1alpha1.AzVolumePhase {
+	return v1alpha1.AzVolumePhase(phase)
 }

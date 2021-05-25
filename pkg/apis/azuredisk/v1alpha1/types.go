@@ -44,9 +44,11 @@ type AzVolume struct {
 type AzVolumePhase string
 
 const (
+	VolumePending   AzVolumePhase = "Pending"
 	VolumeBound     AzVolumePhase = "Bound"
 	VolumeReleased  AzVolumePhase = "Released"
 	VolumeAvailable AzVolumePhase = "Available"
+	VolumeFailed    AzVolumePhase = "Failed"
 )
 
 // AzVolumeSpec is the spec for an AzVolume resource

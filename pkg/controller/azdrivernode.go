@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"sync"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -85,33 +84,6 @@ func (r *ReconcileAzDriverNode) Reconcile(ctx context.Context, request reconcile
 	klog.Errorf("Failed to query node. Error: %v. Will retry...", err)
 
 	return reconcile.Result{Requeue: true}, err
-}
-
-func (r *ReconcileAzDriverNode) cleanUpAzDriverNodes(ctx context.Context) error {
-	azDriverNodes, err := r.azVolumeClient.DiskV1alpha1().AzDriverNodes(r.namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		klog.Errorf("failed to list AzDriverNodes: %v", err)
-		return err
-	}
-
-	for _, azDriverNode := range azDriverNodes.Items {
-		if err := r.client.Delete(ctx, &azDriverNode, &client.DeleteOptions{}); err != nil {
-			klog.Errorf("failed to delete AzDriverNodes (%s): %v", azDriverNode.Name, err)
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (r *ReconcileAzDriverNode) MonitorAndCleanUp(ctx context.Context, wg *sync.WaitGroup) {
-	// start a separate goroutine to monitor context cancellation. clean up upon cancellation
-	wg.Add(1)
-	go func(wg *sync.WaitGroup, ctx context.Context) {
-		defer wg.Done()
-		<-ctx.Done()
-		_ = r.cleanUpAzDriverNodes(context.TODO())
-	}(wg, ctx)
 }
 
 // NewAzDriverNodeController initializes azdrivernode-controller

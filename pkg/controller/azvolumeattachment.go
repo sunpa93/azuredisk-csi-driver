@@ -214,13 +214,14 @@ func (r *ReconcileAzVolumeAttachment) syncAll(ctx context.Context, syncedVolumeA
 			if pv.Spec.CSI == nil || pv.Spec.CSI.Driver != azureutils.DriverName {
 				continue
 			}
+			volumesToSync[pv.Spec.CSI.VolumeHandle] = true
 
 			diskName, err := azureutils.GetDiskNameFromAzureManagedDiskURI(pv.Spec.CSI.VolumeHandle)
 			if err != nil {
 				klog.Warningf("failed to extract disk name from volumehandle (%s): %v", pv.Spec.CSI.VolumeHandle, err)
+				delete(volumesToSync, pv.Spec.CSI.VolumeHandle)
 				continue
 			}
-			volumesToSync[diskName] = true
 			nodeName := volumeAttachment.Spec.NodeName
 			azVolumeAttachmentName := azureutils.GetAzVolumeAttachmentName(diskName, nodeName)
 
@@ -235,11 +236,17 @@ func (r *ReconcileAzVolumeAttachment) syncAll(ctx context.Context, syncedVolumeA
 				_, err := r.azVolumeClient.DiskV1alpha1().AzVolumeAttachments(r.namespace).Create(ctx, &v1alpha1.AzVolumeAttachment{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: azVolumeAttachmentName,
+						Labels: map[string]string{
+							NodeNameLabel:   nodeName,
+							VolumeNameLabel: *volumeName,
+						},
 					},
 					Spec: v1alpha1.AzVolumeAttachmentSpec{
 						UnderlyingVolume: *volumeName,
+						VolumeID:         pv.Spec.CSI.VolumeHandle,
 						NodeName:         nodeName,
 						RequestedRole:    v1alpha1.PrimaryRole,
+						VolumeContext:    map[string]string{},
 					},
 				}, metav1.CreateOptions{})
 				if err != nil {
@@ -276,7 +283,12 @@ func (r *ReconcileAzVolumeAttachment) syncAll(ctx context.Context, syncedVolumeA
 		r.mutexMap[volume] = &sync.Mutex{}
 		workerControl <- struct{}{}
 		go func(vol string) {
-			results <- resultStruct{err: r.syncVolume(ctx, vol, SyncEvent, false, false), volume: vol}
+			diskName, err := azureutils.GetDiskNameFromAzureManagedDiskURI(vol)
+			if err == nil {
+				results <- resultStruct{err: r.syncVolume(ctx, vol, SyncEvent, false, false), volume: diskName}
+			} else {
+				klog.Warningf("failed to extract diskname from disk URI (%s): %v", vol, err)
+			}
 			<-workerControl
 		}(volume)
 	}
@@ -952,7 +964,7 @@ func (r *ReconcileAzVolumeAttachment) GetDiskInfo(ctx context.Context, volume st
 	return
 }
 
-func (r *ReconcileAzVolumeAttachment) RecoverAndMonitor(ctx context.Context, wg *sync.WaitGroup) error {
+func (r *ReconcileAzVolumeAttachment) Recover(ctx context.Context) error {
 	// try to recover states
 	var syncedVolumeAttachments, volumesToSync map[string]bool
 	for i := 0; i < maxRetry; i++ {
@@ -968,20 +980,13 @@ func (r *ReconcileAzVolumeAttachment) RecoverAndMonitor(ctx context.Context, wg 
 		}
 	}
 
-	// create a seperate goroutine listening for context cancellation and clean up before terminating
-	wg.Add(1)
-	go func(wg *sync.WaitGroup, ctx context.Context) {
-		defer wg.Done()
-		<-ctx.Done()
-		r.isInCleanUp = true
-		r.cleanUpUponCancel(context.TODO(), r.client, r.azVolumeClient, r.namespace)
-	}(wg, ctx)
-
 	return nil
 }
 
-func (r *ReconcileAzVolumeAttachment) cleanUpUponCancel(ctx context.Context, client client.Client, azClient azVolumeClientSet.Interface, namespace string) {
-	azVolumeAttachments, err := azClient.DiskV1alpha1().AzVolumeAttachments(namespace).List(ctx, metav1.ListOptions{})
+func (r *ReconcileAzVolumeAttachment) CleanUpUponCancel(ctx context.Context) {
+	klog.Infof("Starting AzVolumeAttachment CRI clean up")
+	r.isInCleanUp = true
+	azVolumeAttachments, err := r.azVolumeClient.DiskV1alpha1().AzVolumeAttachments(r.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		klog.Warningf("failed to get AzVolumeAttachment List: %v", err)
 		return

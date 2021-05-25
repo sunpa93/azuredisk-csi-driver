@@ -14,7 +14,7 @@
 
 ARG ARCH
 FROM k8s.gcr.io/build-image/debian-base:buster-v1.6.0
-RUN clean-install util-linux e2fsprogs mount ca-certificates udev xfsprogs
+RUN clean-install util-linux e2fsprogs mount ca-certificates udev xfsprogs telnet
 
 LABEL maintainers="andyzhangx"
 LABEL description="Azure Disk CSI Driver"

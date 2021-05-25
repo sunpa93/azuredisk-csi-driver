@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 FROM mcr.microsoft.com/aks/fundamental/base-ubuntu:v0.0.5
-RUN apt-get update && apt-get install -y util-linux e2fsprogs mount ca-certificates udev xfsprogs
+RUN apt-get update && apt-get install -y util-linux e2fsprogs mount ca-certificates udev xfsprogs telnet
 LABEL maintainers="andyzhangx"
 LABEL description="Azure Disk CSI Driver"
 

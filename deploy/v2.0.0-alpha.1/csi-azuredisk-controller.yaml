@@ -177,6 +177,10 @@ spec:
             requests:
               cpu: 10m
               memory: 20Mi
+          lifecycle:
+            preStop:
+              exec:
+                command: ["telnet","localhost","3333"]
       volumes:
         - name: socket-dir
           emptyDir: {}
