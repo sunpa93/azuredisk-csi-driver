@@ -149,7 +149,7 @@ func (r *ReconcileAzVolumeAttachment) handleAzVolumeAttachmentEvent(ctx context.
 		// if the azVolumeAttachment's deletion timestamp has been set, and is before the current time, detach the disk from the node and delete the finalizer
 	} else if now := metav1.Now(); azVolumeAttachment.ObjectMeta.DeletionTimestamp.Before(&now) {
 		klog.Infof("Initiating Detach operation for AzVolumeAttachment (%s)", azVolumeAttachment.Name)
-		if err := r.triggerDetach(ctx, azVolumeAttachment.Name); err != nil {
+		if err := r.triggerDetach(ctx, azVolumeAttachment.Name, true); err != nil {
 			// if detach failed, requeue the request
 			klog.Errorf("failed to delete AzVolumeAttachment (%s): %v", azVolumeAttachment.Name, err)
 			return reconcile.Result{Requeue: true}, err
@@ -779,9 +779,17 @@ func (r *ReconcileAzVolumeAttachment) triggerAttach(ctx context.Context, attachm
 	return nil
 }
 
-func (r *ReconcileAzVolumeAttachment) triggerDetach(ctx context.Context, attachmentName string) error {
+func (r *ReconcileAzVolumeAttachment) triggerDetach(ctx context.Context, attachmentName string, useCache bool) error {
 	var azVolumeAttachment v1alpha1.AzVolumeAttachment
-	if err := r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: attachmentName}, &azVolumeAttachment); err != nil {
+	var err error
+	if useCache {
+		err = r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: attachmentName}, &azVolumeAttachment)
+	} else {
+		var temp *v1alpha1.AzVolumeAttachment
+		temp, err = r.azVolumeClient.DiskV1alpha1().AzVolumeAttachments(r.namespace).Get(ctx, attachmentName, metav1.GetOptions{})
+		azVolumeAttachment = *temp
+	}
+	if err != nil {
 		klog.Errorf("failed to get AzVolumeAttachment (%s): %v", attachmentName, err)
 		return err
 	}
@@ -1000,7 +1008,7 @@ func (r *ReconcileAzVolumeAttachment) CleanUpUponCancel(ctx context.Context) {
 			}
 			// if replica attachment, detach the volume and delete the CRI
 		} else {
-			if err = r.triggerDetach(ctx, attachment.Name); err != nil {
+			if err = r.triggerDetach(ctx, attachment.Name, false); err != nil {
 				klog.Warningf("failed to delete AzVolumeAttachment (%s): %v", attachment.Name, err)
 			} else {
 				klog.V(5).Infof("Deleted AzVolumeAttachment (%s)", attachment.Name)

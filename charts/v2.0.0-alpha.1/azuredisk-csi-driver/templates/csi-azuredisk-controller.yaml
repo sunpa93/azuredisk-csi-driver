@@ -207,8 +207,9 @@ spec:
               memory: 20Mi
           lifecycle:
             preStop:
-              exec:
-                command: ["telnet","localhost","3333"]
+              httpGet:
+                port: 8090
+                path: shutdown
       volumes:
         - name: socket-dir
           emptyDir: {}

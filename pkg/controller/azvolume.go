@@ -305,8 +305,31 @@ func (r *reconcileAzVolume) RecoverAndMonitor(wg *sync.WaitGroup, ctx context.Co
 	return nil
 }
 
-func NewAzVolumeController(mgr manager.Manager, azVolumeClient *azVolumeClientSet.Interface, namespace string, cloudProvisioner CloudProvisioner) (*reconcileAzVolume, error) {
-	reconciler := reconcileAzVolume{client: mgr.GetClient(), azVolumeClient: *azVolumeClient, namespace: namespace, cloudProvisioner: cloudProvisioner}
+func (r *ReconcileAzVolume) CleanUpUponCancel(ctx context.Context) {
+	r.isInCleanUp = true
+	klog.Infof("Starting AzVolume CRI clean-up")
+
+	azVolumes, err := r.azVolumeClient.DiskV1alpha1().AzVolumes(r.namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		klog.Warningf("failed to get AzVolume list: %v", err)
+		return
+	}
+	for _, azVolume := range azVolumes.Items {
+		if err := r.deleteFinalizer(ctx, azVolume.Name, map[string]bool{azureutils.AzVolumeFinalizer: true, AzVolumeAttachmentFinalizer: true}); err != nil {
+			klog.Warningf("failed to remove finalizer from AzVolume (%s): %v", azVolume.Name, err)
+		}
+	}
+}
+
+func NewAzVolumeController(mgr manager.Manager, azVolumeClient *azVolumeClientSet.Interface, kubeClient *kubeClientSet.Interface, namespace string, cloudProvisioner CloudProvisioner) (*ReconcileAzVolume, error) {
+	reconciler := ReconcileAzVolume{
+		client:           mgr.GetClient(),
+		azVolumeClient:   *azVolumeClient,
+		kubeClient:       *kubeClient,
+		namespace:        namespace,
+		cloudProvisioner: cloudProvisioner,
+		isInCleanUp:      false,
+	}
 	logger := mgr.GetLogger().WithValues("controller", "azvolume")
 
 	c, err := controller.New("azvolume-controller", mgr, controller.Options{
@@ -377,7 +400,11 @@ func (r *reconcileAzVolume) initializeMeta(ctx context.Context, volumeName strin
 	return nil
 }
 
+<<<<<<< HEAD
 func (r *reconcileAzVolume) deleteFinalizer(ctx context.Context, volumeName string) error {
+=======
+func (r *ReconcileAzVolume) deleteFinalizer(ctx context.Context, volumeName string, finalizersToDelete map[string]bool, useCache bool) error {
+>>>>>>> use http preStop hook instead
 	var azVolume v1alpha1.AzVolume
 	if err := r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: volumeName}, &azVolume); err != nil {
 		klog.Errorf("failed to get AzVolume (%s): %v", volumeName, err)

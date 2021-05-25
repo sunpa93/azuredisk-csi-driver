@@ -22,7 +22,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"net"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -270,24 +270,26 @@ func (d *DriverV2) StartControllersAndDieOnExit(ctx context.Context) {
 		os.Exit(1)
 	}
 
-	cleanUpCtx, cleanUpCancel := context.WithCancel(ctx)
-	defer cleanUpCancel()
+	// cleanUpCtx, cleanUpCancel := context.WithCancel(ctx)
+	// defer cleanUpCancel()
 
-	var conn net.Conn
-	cleanUpAddress := fmt.Sprintf("%s:%s", cleanUpHost, cleanUpPort)
-	listen, err := net.Listen("tcp", cleanUpAddress)
-	if err != nil {
-		klog.Errorf("failed to listen to clean up ping: %v", err)
-		os.Exit(1)
-	}
-	defer listen.Close()
-	klog.Infof("Listening to clean up signal on %s", cleanUpAddress)
+	// var conn net.Conn
+	// cleanUpAddress := fmt.Sprintf("%s:%s", cleanUpHost, cleanUpPort)
+	// listen, err := net.Listen("tcp", cleanUpAddress)
+	// if err != nil {
+	// 	klog.Errorf("failed to listen to clean up ping: %v", err)
+	// 	os.Exit(1)
+	// }
+	// defer listen.Close()
+	// klog.Infof("Listening to clean up signal on %s", cleanUpAddress)
 
-	go func(cleanUpCancel context.CancelFunc) {
-		conn, _ = listen.Accept()
-		klog.Infof("Received a clean up signal", cleanUpAddress)
-		cleanUpCancel()
-	}(cleanUpCancel)
+	// shutdownFunc := go func(w http.ResponseWriter, req *http.Request) {
+	// 	conn, _ = listen.Accept()
+	// 	klog.Infof("Received a clean up signal", cleanUpAddress)
+	// 	cleanUpCancel()
+	// }(cleanUpCancel)
+
+	// http.HandleFunc("/shutdown", )
 
 	// Setup a new controller to clean-up AzDriverNodes
 	// objects for the nodes which get deleted
@@ -305,7 +307,7 @@ func (d *DriverV2) StartControllersAndDieOnExit(ctx context.Context) {
 		os.Exit(1)
 	}
 	// recover lost states if necessary and start monitoring context cancellation in order to clean up when necessary
-	if err := azvaReconciler.Recover(cleanUpCtx); err != nil {
+	if err := azvaReconciler.Recover(ctx); err != nil {
 		klog.Warningf("Failed to recover AzVolumeAttachments: %v.", err)
 	}
 
@@ -316,7 +318,7 @@ func (d *DriverV2) StartControllersAndDieOnExit(ctx context.Context) {
 		os.Exit(1)
 	}
 	// recover lost states if necessary and start monitorting context cancellation in order to clean up when necessary
-	if err := azvReconciler.Recover(cleanUpCtx); err != nil {
+	if err := azvReconciler.Recover(ctx); err != nil {
 		klog.Warningf("Failed to recover AzVolume: %v", err)
 	}
 
@@ -336,16 +338,17 @@ func (d *DriverV2) StartControllersAndDieOnExit(ctx context.Context) {
 
 	mgrCtx, mgrCancel := context.WithCancel(ctx)
 	// start goroutine to wait for all clean ups to be completed before cancelling context for the controller manager
-	go func(cleanUpCtx context.Context, mgrCancel context.CancelFunc) {
-		<-cleanUpCtx.Done()
+	shutdownFunc := func(w http.ResponseWriter, req *http.Request) {
 		azvaReconciler.CleanUpUponCancel(context.TODO())
 		azvReconciler.CleanUpUponCancel(context.TODO())
 		klog.Infof("Finished cleaning up all CRIs for azuredisk driver. Now shutting down the controller manager...")
+		fmt.Fprintf(w, "CRI clean up complete.")
 		mgrCancel()
-		if conn != nil {
-			conn.Close()
-		}
-	}(cleanUpCtx, mgrCancel)
+	}
+
+	http.HandleFunc("/shutdown", shutdownFunc)
+	http.ListenAndServe(":8090", nil)
+	klog.V(2).Info("Start listening on Port 8090 for clean up request...")
 
 	klog.V(2).Info("Starting controller manager")
 	if err := mgr.Start(mgrCtx); err != nil {
