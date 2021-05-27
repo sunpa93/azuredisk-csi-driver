@@ -23,14 +23,11 @@ import (
 	"sync"
 	"time"
 
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
-	"k8s.io/apimachinery/pkg/types"
 	kubeClientSet "k8s.io/client-go/kubernetes"
 	volerr "k8s.io/cloud-provider/volume/errors"
 	"k8s.io/klog/v2"
@@ -113,8 +110,7 @@ func (r *ReconcileAzVolumeAttachment) Reconcile(ctx context.Context, request rec
 }
 
 func (r *ReconcileAzVolumeAttachment) handleAzVolumeAttachmentEvent(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
-	var azVolumeAttachment v1alpha1.AzVolumeAttachment
-	err := r.client.Get(ctx, request.NamespacedName, &azVolumeAttachment)
+	azVolumeAttachment, err := azureutils.GetAzVolumeAttachment(ctx, r.client, r.azVolumeClient, request.Name, request.Namespace, true)
 	// if object is not found, it means the object has been deleted. Log the deletion and do not requeue
 	if errors.IsNotFound(err) {
 		klog.Infof("AzVolumeAttachment (%s) has successfully been deleted.", request.Name)
@@ -226,11 +222,14 @@ func (r *ReconcileAzVolumeAttachment) syncAll(ctx context.Context, syncedVolumeA
 			azVolumeAttachmentName := azureutils.GetAzVolumeAttachmentName(diskName, nodeName)
 
 			// check if the CRI exists already
-			_, err = r.azVolumeClient.DiskV1alpha1().AzVolumeAttachments(r.namespace).Get(ctx, azVolumeAttachmentName, metav1.GetOptions{})
+			_, err = azureutils.GetAzVolumeAttachment(ctx, r.client, r.azVolumeClient, azVolumeAttachmentName, r.namespace, false)
 			// if CRI already exists, append finalizer to it
 			if err == nil {
-				// TODO add finalizer
-
+				err := r.initializeMeta(ctx, azVolumeAttachmentName, false)
+				if err != nil {
+					klog.Errorf("failed to add finalizer to AzVolumeAttachment (%s): %v", azVolumeAttachmentName, err)
+					return true, syncedVolumeAttachments, volumesToSync, err
+				}
 				// if not found, create one
 			} else if errors.IsNotFound(err) {
 				_, err := r.azVolumeClient.DiskV1alpha1().AzVolumeAttachments(r.namespace).Create(ctx, &v1alpha1.AzVolumeAttachment{
@@ -250,7 +249,7 @@ func (r *ReconcileAzVolumeAttachment) syncAll(ctx context.Context, syncedVolumeA
 					},
 				}, metav1.CreateOptions{})
 				if err != nil {
-					klog.Errorf("failed to create AzVolumeAttachment (%s) for volume (%s) and node (%s): %v", azureutils.GetAzVolumeAttachmentName(*volumeName, nodeName), *volumeName, nodeName, err)
+					klog.Errorf("failed to create AzVolumeAttachment (%s) for volume (%s) and node (%s): %v", azVolumeAttachmentName, *volumeName, nodeName, err)
 					return true, syncedVolumeAttachments, volumesToSync, err
 				}
 			} else {
@@ -285,7 +284,7 @@ func (r *ReconcileAzVolumeAttachment) syncAll(ctx context.Context, syncedVolumeA
 		go func(vol string) {
 			diskName, err := azureutils.GetDiskNameFromAzureManagedDiskURI(vol)
 			if err == nil {
-				results <- resultStruct{err: r.syncVolume(ctx, vol, SyncEvent, false, false), volume: diskName}
+				results <- resultStruct{err: r.syncVolume(ctx, diskName, SyncEvent, false, false), volume: diskName}
 			} else {
 				klog.Warningf("failed to extract diskname from disk URI (%s): %v", vol, err)
 			}
@@ -317,9 +316,10 @@ func (r *ReconcileAzVolumeAttachment) syncVolume(ctx context.Context, volume str
 	}
 
 	var azVolume v1alpha1.AzVolume
-	if err := r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: volume}, &azVolume); err != nil {
-		// if AzVolume is not found, the volume is deleted, so do not requeue and do not return error
-		// AzVolumeAttachment objects for the volume will be triggered to be deleted.
+	azVolume, err := azureutils.GetAzVolume(ctx, r.client, r.azVolumeClient, volume, r.namespace, useCache)
+	// if AzVolume is not found, the volume is deleted, so do not requeue and do not return error
+	// AzVolumeAttachment objects for the volume will be triggered to be deleted.
+	if err != nil {
 		if errors.IsNotFound(err) {
 			return nil
 		}
@@ -429,7 +429,8 @@ func (r *ReconcileAzVolumeAttachment) syncVolume(ctx context.Context, volume str
 
 func (r *ReconcileAzVolumeAttachment) manageReplicas(ctx context.Context, underlyingVolume string, eventType Event, isPrimary bool) error {
 	var azVolume v1alpha1.AzVolume
-	if err := r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: underlyingVolume}, &azVolume); err != nil {
+	azVolume, err := azureutils.GetAzVolume(ctx, r.client, r.azVolumeClient, underlyingVolume, r.namespace, true)
+	if err != nil {
 		// if AzVolume is not found, the volume is deleted, so do not requeue and do not return error
 		// AzVolumeAttachment objects for the volume will be triggered to be deleted.
 		if errors.IsNotFound(err) {
@@ -598,9 +599,9 @@ func (r *ReconcileAzVolumeAttachment) listAzVolumeAttachmentsByNodeName(ctx cont
 	return filteredAttachments, nil
 }
 
-func (r *ReconcileAzVolumeAttachment) initializeMeta(ctx context.Context, attachmentName string) error {
-	var azVolumeAttachment v1alpha1.AzVolumeAttachment
-	if err := r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: attachmentName}, &azVolumeAttachment); err != nil {
+func (r *ReconcileAzVolumeAttachment) initializeMeta(ctx context.Context, attachmentName string, useCache bool) error {
+	azVolumeAttachment, err := azureutils.GetAzVolumeAttachment(ctx, r.client, r.azVolumeClient, attachmentName, r.namespace, useCache)
+	if err != nil {
 		klog.Errorf("failed to get AzVolumeAttachment (%s): %v", attachmentName, err)
 		return err
 	}
@@ -637,9 +638,9 @@ func (r *ReconcileAzVolumeAttachment) initializeMeta(ctx context.Context, attach
 	return nil
 }
 
-func (r *ReconcileAzVolumeAttachment) deleteFinalizer(ctx context.Context, attachmentName string) error {
-	var azVolumeAttachment v1alpha1.AzVolumeAttachment
-	if err := r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: attachmentName}, &azVolumeAttachment); err != nil {
+func (r *ReconcileAzVolumeAttachment) deleteFinalizer(ctx context.Context, attachmentName string, useCache bool) error {
+	azVolumeAttachment, err := azureutils.GetAzVolumeAttachment(ctx, r.client, r.azVolumeClient, attachmentName, r.namespace, useCache)
+	if err != nil {
 		klog.Errorf("failed to get AzVolumeAttachment (%s): %v", attachmentName, err)
 		return err
 	}
@@ -666,7 +667,8 @@ func (r *ReconcileAzVolumeAttachment) deleteFinalizer(ctx context.Context, attac
 
 func (r *ReconcileAzVolumeAttachment) addFinalizerToAzVolume(ctx context.Context, volumeName string) error {
 	var azVolume v1alpha1.AzVolume
-	if err := r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: volumeName}, &azVolume); err != nil {
+	azVolume, err := azureutils.GetAzVolume(ctx, r.client, r.azVolumeClient, volumeName, r.namespace, true)
+	if err != nil {
 		klog.Errorf("failed to get AzVolume (%s): %v", volumeName, err)
 		return err
 	}
@@ -692,7 +694,8 @@ func (r *ReconcileAzVolumeAttachment) addFinalizerToAzVolume(ctx context.Context
 
 func (r *ReconcileAzVolumeAttachment) deleteFinalizerFromAzVolume(ctx context.Context, volumeName string) error {
 	var azVolume v1alpha1.AzVolume
-	if err := r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: volumeName}, &azVolume); err != nil {
+	azVolume, err := azureutils.GetAzVolume(ctx, r.client, r.azVolumeClient, volumeName, r.namespace, true)
+	if err != nil {
 		if errors.IsNotFound(err) {
 			return nil
 		}
@@ -738,7 +741,8 @@ func labelExists(labels map[string]string, label string) bool {
 
 func (r *ReconcileAzVolumeAttachment) triggerAttach(ctx context.Context, attachmentName string) error {
 	var azVolumeAttachment v1alpha1.AzVolumeAttachment
-	if err := r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: attachmentName}, &azVolumeAttachment); err != nil {
+	azVolumeAttachment, err := azureutils.GetAzVolumeAttachment(ctx, r.client, r.azVolumeClient, attachmentName, r.namespace, true)
+	if err != nil {
 		klog.Errorf("failed to get AzVolumeAttachment (%s): %v", attachmentName, err)
 		return err
 	}
@@ -763,7 +767,7 @@ func (r *ReconcileAzVolumeAttachment) triggerAttach(ctx context.Context, attachm
 	}
 
 	// Initialize finalizer and add label to the object
-	if err := r.initializeMeta(ctx, azVolumeAttachment.Name); err != nil {
+	if err := r.initializeMeta(ctx, azVolumeAttachment.Name, true); err != nil {
 		return err
 	}
 
@@ -780,15 +784,7 @@ func (r *ReconcileAzVolumeAttachment) triggerAttach(ctx context.Context, attachm
 }
 
 func (r *ReconcileAzVolumeAttachment) triggerDetach(ctx context.Context, attachmentName string, useCache bool) error {
-	var azVolumeAttachment v1alpha1.AzVolumeAttachment
-	var err error
-	if useCache {
-		err = r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: attachmentName}, &azVolumeAttachment)
-	} else {
-		var temp *v1alpha1.AzVolumeAttachment
-		temp, err = r.azVolumeClient.DiskV1alpha1().AzVolumeAttachments(r.namespace).Get(ctx, attachmentName, metav1.GetOptions{})
-		azVolumeAttachment = *temp
-	}
+	azVolumeAttachment, err := azureutils.GetAzVolumeAttachment(ctx, r.client, r.azVolumeClient, attachmentName, r.namespace, useCache)
 	if err != nil {
 		klog.Errorf("failed to get AzVolumeAttachment (%s): %v", attachmentName, err)
 		return err
@@ -796,7 +792,7 @@ func (r *ReconcileAzVolumeAttachment) triggerDetach(ctx context.Context, attachm
 
 	// only detach if volume attachment does not exist or the annotation has not been set
 	if azVolumeAttachment.Annotations == nil || !metav1.HasAnnotation(azVolumeAttachment.ObjectMeta, azureutils.VolumeAttachmentExistsAnnotation) {
-		if err := r.detachVolume(ctx, azVolumeAttachment.Spec.UnderlyingVolume, azVolumeAttachment.Spec.NodeName); err != nil {
+		if err := r.detachVolume(ctx, azVolumeAttachment.Spec.VolumeID, azVolumeAttachment.Spec.NodeName); err != nil {
 			klog.Errorf("failed to detach volume %s from node %s: %v", azVolumeAttachment.Spec.UnderlyingVolume, azVolumeAttachment.Spec.NodeName, err)
 			return r.updateStatusWithError(ctx, azVolumeAttachment.Name, err)
 		}
@@ -811,7 +807,7 @@ func (r *ReconcileAzVolumeAttachment) triggerDetach(ctx context.Context, attachm
 	}
 
 	// If above procedures were successful, remove finalizer from the object
-	if err := r.deleteFinalizer(ctx, azVolumeAttachment.Name); err != nil {
+	if err := r.deleteFinalizer(ctx, azVolumeAttachment.Name, true); err != nil {
 		klog.Errorf("failed to delete finalizer %s for azvolumeattachment %s: %v", AzVolumeAttachmentFinalizer, azVolumeAttachment.Name, err)
 		return err
 	}
@@ -826,8 +822,8 @@ func (r *ReconcileAzVolumeAttachment) triggerDetach(ctx context.Context, attachm
 }
 
 func (r *ReconcileAzVolumeAttachment) updateStatus(ctx context.Context, attachmentName string, status map[string]string) error {
-	var azVolumeAttachment v1alpha1.AzVolumeAttachment
-	if err := r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: attachmentName}, &azVolumeAttachment); err != nil {
+	azVolumeAttachment, err := azureutils.GetAzVolumeAttachment(ctx, r.client, r.azVolumeClient, attachmentName, r.namespace, true)
+	if err != nil {
 		klog.Errorf("failed to get AzVolumeAttachment (%s): %v", attachmentName, err)
 		return err
 	}
@@ -855,8 +851,8 @@ func (r *ReconcileAzVolumeAttachment) updateStatus(ctx context.Context, attachme
 }
 
 func (r *ReconcileAzVolumeAttachment) updateStatusWithError(ctx context.Context, attachmentName string, err error) error {
-	var azVolumeAttachment v1alpha1.AzVolumeAttachment
-	if err := r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: attachmentName}, &azVolumeAttachment); err != nil {
+	azVolumeAttachment, err := azureutils.GetAzVolumeAttachment(ctx, r.client, r.azVolumeClient, attachmentName, r.namespace, true)
+	if err != nil {
 		klog.Errorf("failed to get AzVolumeAttachment (%s): %v", attachmentName, err)
 		return err
 	}
@@ -896,8 +892,7 @@ func (r *ReconcileAzVolumeAttachment) updateStatusWithError(ctx context.Context,
 }
 
 func (r *ReconcileAzVolumeAttachment) CleanUpAzVolumeAttachment(ctx context.Context, azVolumeName string) error {
-	var azVolume v1alpha1.AzVolume
-	err := r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: azVolumeName}, &azVolume)
+	azVolume, err := azureutils.GetAzVolume(ctx, r.client, r.azVolumeClient, azVolumeName, r.namespace, true)
 	if err != nil {
 		klog.Errorf("failed to get AzVolume (%s): %v", azVolumeName, err)
 		return err
@@ -931,45 +926,12 @@ func (r *ReconcileAzVolumeAttachment) CleanUpAzVolumeAttachment(ctx context.Cont
 	return nil
 }
 
-func (r *ReconcileAzVolumeAttachment) attachVolume(ctx context.Context, volume, node string, volumeContext map[string]string) (map[string]string, error) {
-	return r.cloudProvisioner.PublishVolume(ctx, volume, node, volumeContext)
+func (r *ReconcileAzVolumeAttachment) attachVolume(ctx context.Context, volumeID, node string, volumeContext map[string]string) (map[string]string, error) {
+	return r.cloudProvisioner.PublishVolume(ctx, volumeID, node, volumeContext)
 }
 
-func (r *ReconcileAzVolumeAttachment) detachVolume(ctx context.Context, volume, node string) error {
-	return r.cloudProvisioner.UnpublishVolume(ctx, volume, node)
-}
-
-func (r *ReconcileAzVolumeAttachment) GetDiskInfo(ctx context.Context, volume string) (diskURI, diskName string, err error) {
-	// Get Disk URI
-	var pv corev1.PersistentVolume
-	err = r.client.Get(ctx, types.NamespacedName{Name: volume}, &pv)
-	if err != nil {
-		klog.Errorf("failed to find a pv (%s): %v", volume)
-		return
-	}
-	if pv.Spec.CSI == nil || pv.Spec.CSI.Driver != azureutils.DriverName {
-		err = status.Errorf(codes.InvalidArgument, "pv (%s) needs to be a azure disk CSI driver", volume)
-		klog.Errorf("%v", err)
-		return
-	}
-	diskURI = pv.Spec.CSI.VolumeHandle
-
-	// TODO uncomment below when controller provisioner PR is merged
-	/*
-		// Check if it is a valid disk URI
-		if err = controllerProvisioner.ValidateDiskURI(diskURI); err != nil {
-			klog.Errorf("diskURI (%s) is not in a valid format: %v", diskURI, err)
-			return
-		}
-
-		// Get disk name
-		diskName, err = controllerProvisioner.GetDiskNameFromDiskURI(diskURI)
-		if err != nil {
-			klog.Errorf("diskName could not fetched from the diskURI (%s): %v", diskURI, err)
-			return
-		}
-	*/
-	return
+func (r *ReconcileAzVolumeAttachment) detachVolume(ctx context.Context, volumeID, node string) error {
+	return r.cloudProvisioner.UnpublishVolume(ctx, volumeID, node)
 }
 
 func (r *ReconcileAzVolumeAttachment) Recover(ctx context.Context) error {
@@ -1003,7 +965,7 @@ func (r *ReconcileAzVolumeAttachment) CleanUpUponCancel(ctx context.Context) {
 	for _, attachment := range azVolumeAttachments.Items {
 		// if primary attachment, only delete the finalizer
 		if attachment.Status != nil && attachment.Status.Role == v1alpha1.PrimaryRole {
-			if err = r.deleteFinalizer(ctx, attachment.Name); err != nil {
+			if err = r.deleteFinalizer(ctx, attachment.Name, false); err != nil {
 				klog.Warningf("failed to remove finalizer from Primary AzVolumeAttachment (%s): %v", attachment.Name, err)
 			}
 			// if replica attachment, detach the volume and delete the CRI

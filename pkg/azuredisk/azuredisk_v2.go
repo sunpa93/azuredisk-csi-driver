@@ -69,8 +69,8 @@ const DefaultPrefixLength = 30
 
 // CleanUpPort is used by preStop hook, for sending to the running controller a clean up signal
 // before its SIGTERMed
-const cleanUpPort = "3333"
-const cleanUpHost = "localhost"
+const cleanUpPort = "8090"
+const cleanUpPath = "/shutdown"
 
 // DriverV2 implements all interfaces of CSI drivers
 type DriverV2 struct {
@@ -270,27 +270,6 @@ func (d *DriverV2) StartControllersAndDieOnExit(ctx context.Context) {
 		os.Exit(1)
 	}
 
-	// cleanUpCtx, cleanUpCancel := context.WithCancel(ctx)
-	// defer cleanUpCancel()
-
-	// var conn net.Conn
-	// cleanUpAddress := fmt.Sprintf("%s:%s", cleanUpHost, cleanUpPort)
-	// listen, err := net.Listen("tcp", cleanUpAddress)
-	// if err != nil {
-	// 	klog.Errorf("failed to listen to clean up ping: %v", err)
-	// 	os.Exit(1)
-	// }
-	// defer listen.Close()
-	// klog.Infof("Listening to clean up signal on %s", cleanUpAddress)
-
-	// shutdownFunc := go func(w http.ResponseWriter, req *http.Request) {
-	// 	conn, _ = listen.Accept()
-	// 	klog.Infof("Received a clean up signal", cleanUpAddress)
-	// 	cleanUpCancel()
-	// }(cleanUpCancel)
-
-	// http.HandleFunc("/shutdown", )
-
 	// Setup a new controller to clean-up AzDriverNodes
 	// objects for the nodes which get deleted
 	klog.V(2).Info("Initializing AzDriverNode controller")
@@ -336,22 +315,26 @@ func (d *DriverV2) StartControllersAndDieOnExit(ctx context.Context) {
 		os.Exit(1)
 	}
 
-	mgrCtx, mgrCancel := context.WithCancel(ctx)
 	// start goroutine to wait for all clean ups to be completed before cancelling context for the controller manager
 	shutdownFunc := func(w http.ResponseWriter, req *http.Request) {
-		azvaReconciler.CleanUpUponCancel(context.TODO())
-		azvReconciler.CleanUpUponCancel(context.TODO())
+		// only run clean up if manager with leader lock
+		mgr.Elected()
+		azvaReconciler.CleanUpUponCancel(ctx)
+		azvReconciler.CleanUpUponCancel(ctx)
 		klog.Infof("Finished cleaning up all CRIs for azuredisk driver. Now shutting down the controller manager...")
 		fmt.Fprintf(w, "CRI clean up complete.")
-		mgrCancel()
 	}
 
-	http.HandleFunc("/shutdown", shutdownFunc)
-	http.ListenAndServe(":8090", nil)
-	klog.V(2).Info("Start listening on Port 8090 for clean up request...")
+	go func() {
+		http.HandleFunc(cleanUpPath, shutdownFunc)
+		klog.V(2).Info("Start listening on Port %s for clean up request...", cleanUpPort)
+		if err := http.ListenAndServe(":"+cleanUpPort, nil); err != nil {
+			klog.Errorf("failed to listen for clean up signal on http://localhost:%s%s", cleanUpPort, cleanUpPath)
+		}
+	}()
 
 	klog.V(2).Info("Starting controller manager")
-	if err := mgr.Start(mgrCtx); err != nil {
+	if err := mgr.Start(ctx); err != nil {
 		klog.Errorf("Controller manager exited: %v", err)
 		os.Exit(1)
 	}
