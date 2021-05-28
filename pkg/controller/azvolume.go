@@ -459,7 +459,7 @@ func (r *ReconcileAzVolume) deleteFinalizer(ctx context.Context, volumeName stri
 
 	finalizers := []string{}
 	for _, finalizer := range updated.ObjectMeta.Finalizers {
-		if finalizer == azureutils.AzVolumeFinalizer {
+		if exists := finalizersToDelete[finalizer]; exists {
 			continue
 		}
 		finalizers = append(finalizers, finalizer)
