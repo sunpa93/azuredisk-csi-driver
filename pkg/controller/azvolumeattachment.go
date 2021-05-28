@@ -953,7 +953,7 @@ func (r *ReconcileAzVolumeAttachment) Recover(ctx context.Context) error {
 	return nil
 }
 
-func (r *ReconcileAzVolumeAttachment) CleanUpUponCancel(ctx context.Context) {
+func (r *ReconcileAzVolumeAttachment) CleanUpUpon(ctx context.Context) {
 	klog.Infof("Starting AzVolumeAttachment CRI clean up")
 	r.isInCleanUp = true
 	azVolumeAttachments, err := r.azVolumeClient.DiskV1alpha1().AzVolumeAttachments(r.namespace).List(ctx, metav1.ListOptions{})

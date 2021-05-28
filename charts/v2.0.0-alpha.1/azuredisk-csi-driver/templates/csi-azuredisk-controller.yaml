@@ -163,6 +163,12 @@ spec:
             initialDelaySeconds: 30
             timeoutSeconds: 10
             periodSeconds: 30
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - curl
+                  - http://localhost:8090/shutdown
           env:
             - name: AZURE_CREDENTIAL_FILE
               valueFrom:
@@ -205,11 +211,6 @@ spec:
             requests:
               cpu: 10m
               memory: 20Mi
-          lifecycle:
-            preStop:
-              httpGet:
-                port: 8090
-                path: shutdown
       volumes:
         - name: socket-dir
           emptyDir: {}

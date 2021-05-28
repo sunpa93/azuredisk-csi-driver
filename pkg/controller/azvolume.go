@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"google.golang.org/grpc/codes"
@@ -304,10 +305,58 @@ func (r *reconcileAzVolume) RecoverAndMonitor(wg *sync.WaitGroup, ctx context.Co
 		*/
 	}(wg, ctx)
 
+	for _, pv := range pvs.Items {
+		if pv.Spec.CSI != nil && pv.Spec.CSI.Driver == azureutils.DriverName {
+			diskName, err := azureutils.GetDiskNameFromAzureManagedDiskURI(pv.Spec.CSI.VolumeHandle)
+			if err != nil {
+				klog.Warningf("skipping restoration, failed to extract diskName from volume handle (%s): %v", pv.Spec.CSI.VolumeHandle, err)
+				continue
+			}
+			klog.Infof("Recovering AzVolume (%s)", diskName)
+			requiredBytes, _ := pv.Spec.Capacity.Storage().AsInt64()
+			storageClassName := pv.Spec.StorageClassName
+			if storageClassName == "" {
+				klog.Warningf("skipping restoration, PV (%s) has an empty named storage class", pv.Name)
+				continue
+			}
+			storageClass, err := r.kubeClient.StorageV1().StorageClasses().Get(ctx, pv.Spec.StorageClassName, metav1.GetOptions{})
+			if err != nil {
+				klog.Warningf("skipping restoration, failed to get storage class (%s): %v", pv.Spec.StorageClassName, err)
+				continue
+			}
+			_, maxMountReplicaCount := azureutils.GetMaxSharesAndMaxMountReplicaCount(storageClass.Parameters)
+			phase := azureutils.GetAzVolumePhase(pv.Status.Phase)
+			if _, err := r.azVolumeClient.DiskV1alpha1().AzVolumes(r.namespace).Create(ctx, &v1alpha1.AzVolume{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       strings.ToLower(diskName),
+					Finalizers: []string{azureutils.AzVolumeFinalizer},
+				},
+				Spec: v1alpha1.AzVolumeSpec{
+					MaxMountReplicaCount: maxMountReplicaCount,
+					UnderlyingVolume:     pv.Name,
+					CapacityRange: &v1alpha1.CapacityRange{
+						RequiredBytes: requiredBytes,
+					},
+					VolumeCapability: []v1alpha1.VolumeCapability{},
+				},
+				Status: &v1alpha1.AzVolumeStatus{
+					Phase: phase,
+				},
+			}, metav1.CreateOptions{}); err != nil {
+				klog.Errorf("failed to recover AzVolume (%s): %v", diskName, err)
+			}
+		}
+	}
 	return nil
 }
 
-func (r *ReconcileAzVolume) CleanUpUponCancel(ctx context.Context) {
+func (r *ReconcileAzVolume) Recover(ctx context.Context) error {
+	// recover CRI if possible
+	_ = r.recoverAzVolumes(ctx)
+	return nil
+}
+
+func (r *ReconcileAzVolume) CleanUp(ctx context.Context) {
 	r.isInCleanUp = true
 	klog.Infof("Starting AzVolume CRI clean-up")
 

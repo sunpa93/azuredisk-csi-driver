@@ -285,20 +285,12 @@ func (d *DriverV2) StartControllersAndDieOnExit(ctx context.Context) {
 		klog.Errorf("Failed to initialize AzVolumeAttachmentController. Error: %v. Exiting application...", err)
 		os.Exit(1)
 	}
-	// recover lost states if necessary and start monitoring context cancellation in order to clean up when necessary
-	if err := azvaReconciler.Recover(ctx); err != nil {
-		klog.Warningf("Failed to recover AzVolumeAttachments: %v.", err)
-	}
 
 	klog.V(2).Info("Initializing AzVolume controller")
 	azvReconciler, err := controller.NewAzVolumeController(mgr, d.crdProvisioner.GetDiskClientSetAddr(), &d.kubeClient, d.objectNamespace, d.cloudProvisioner)
 	if err != nil {
 		klog.Errorf("Failed to initialize AzVolumeController. Error: %v. Exiting application...", err)
 		os.Exit(1)
-	}
-	// recover lost states if necessary and start monitorting context cancellation in order to clean up when necessary
-	if err := azvReconciler.Recover(ctx); err != nil {
-		klog.Warningf("Failed to recover AzVolume: %v", err)
 	}
 
 	klog.V(2).Info("Initializing PV controller")
@@ -315,21 +307,32 @@ func (d *DriverV2) StartControllersAndDieOnExit(ctx context.Context) {
 		os.Exit(1)
 	}
 
-	// start goroutine to wait for all clean ups to be completed before cancelling context for the controller manager
 	shutdownFunc := func(w http.ResponseWriter, req *http.Request) {
-		// only run clean up if manager with leader lock
-		mgr.Elected()
-		azvaReconciler.CleanUpUponCancel(ctx)
-		azvReconciler.CleanUpUponCancel(ctx)
+		klog.Infof("Received clean up signal; initiating CRI clean up.")
+		azvaReconciler.CleanUp(ctx)
+		azvReconciler.CleanUp(ctx)
 		klog.Infof("Finished cleaning up all CRIs for azuredisk driver. Now shutting down the controller manager...")
 		fmt.Fprintf(w, "CRI clean up complete.")
 	}
 
+	// This goroutine is preserved for leader controller manager
+	// Leader controller manager should recover CRI if possible and clean them up before exiting.
 	go func() {
+		<-mgr.Elected()
+		// recover lost states if necessary
+		klog.Infof("Elected as leader; initiating CRI recovery...")
+		if err := azvReconciler.Recover(ctx); err != nil {
+			klog.Warningf("Failed to recover AzVolume: %v", err)
+		}
+		if err := azvaReconciler.Recover(ctx); err != nil {
+			klog.Warningf("Failed to recover AzVolumeAttachments: %v.", err)
+		}
+
+		// wait for http get request queued by preStop hook lifecycle to clean up CRIs before exiting.
 		http.HandleFunc(cleanUpPath, shutdownFunc)
-		klog.V(2).Info("Start listening on Port %s for clean up request...", cleanUpPort)
+		klog.V(2).Infof("Start listening on Port %s for clean up request...", cleanUpPort)
 		if err := http.ListenAndServe(":"+cleanUpPort, nil); err != nil {
-			klog.Errorf("failed to listen for clean up signal on http://localhost:%s%s", cleanUpPort, cleanUpPath)
+			klog.Errorf("failed to listen for clean up signal on :%s%s", cleanUpPort, cleanUpPath)
 		}
 	}()
 
