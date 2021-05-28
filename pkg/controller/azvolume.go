@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -44,15 +43,17 @@ import (
 )
 
 //Struct for the reconciler
-type reconcileAzVolume struct {
+type ReconcileAzVolume struct {
 	client           client.Client
 	azVolumeClient   azVolumeClientSet.Interface
+	kubeClient       kubeClientSet.Interface
 	namespace        string
 	cloudProvisioner CloudProvisioner
+	isInCleanUp      bool
 }
 
 // Implement reconcile.Reconciler so the controller can reconcile objects
-var _ reconcile.Reconciler = &reconcileAzVolume{}
+var _ reconcile.Reconciler = &ReconcileAzVolume{}
 
 func (r *ReconcileAzVolume) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
 	// Don't reconcile when in clean up
@@ -278,32 +279,25 @@ func (r *ReconcileAzVolume) updateStatusWithError(ctx context.Context, volumeNam
 	return nil
 }
 
-func (r *reconcileAzVolume) expandVolume(ctx context.Context, azVolume *v1alpha1.AzVolume) (*v1alpha1.AzVolumeStatusParams, error) {
+func (r *ReconcileAzVolume) expandVolume(ctx context.Context, azVolume *v1alpha1.AzVolume) (*v1alpha1.AzVolumeStatusParams, error) {
 	return r.cloudProvisioner.ExpandVolume(ctx, azVolume.Status.ResponseObject.VolumeID, azVolume.Spec.CapacityRange, azVolume.Spec.Secrets)
 }
 
-func (r *reconcileAzVolume) createVolume(ctx context.Context, azVolume *v1alpha1.AzVolume) (*v1alpha1.AzVolumeStatusParams, error) {
+func (r *ReconcileAzVolume) createVolume(ctx context.Context, azVolume *v1alpha1.AzVolume) (*v1alpha1.AzVolumeStatusParams, error) {
 	return r.cloudProvisioner.CreateVolume(ctx, azVolume.Spec.UnderlyingVolume, azVolume.Spec.CapacityRange, azVolume.Spec.VolumeCapability, azVolume.Spec.Parameters, azVolume.Spec.Secrets, azVolume.Spec.ContentVolumeSource, azVolume.Spec.AccessibilityRequirements)
 }
 
-func (r *reconcileAzVolume) deleteVolume(ctx context.Context, azVolume *v1alpha1.AzVolume) error {
+func (r *ReconcileAzVolume) deleteVolume(ctx context.Context, azVolume *v1alpha1.AzVolume) error {
 	err := r.cloudProvisioner.DeleteVolume(ctx, azVolume.Status.ResponseObject.VolumeID, azVolume.Spec.Secrets)
 	return err
 }
 
-func (r *reconcileAzVolume) RecoverAndMonitor(wg *sync.WaitGroup, ctx context.Context) error {
-	// TODO add recover function for AzVolume
-	// start a separate goroutine to monitor context cancellation. clean up upon cancellation
-	go func(wg *sync.WaitGroup, ctx context.Context) {
-		wg.Add(1)
-		defer wg.Done()
-		<-ctx.Done()
-		// clean up
-		/*
-			TODO
-			How should the AzVolume controller distinguish deletion of AzVolume triggered by 1) context cancellation and 2) controllerserver delete volume
-		*/
-	}(wg, ctx)
+func (r *ReconcileAzVolume) recoverAzVolumes(ctx context.Context) error {
+	// Get PV list and create AzVolume for PV with azuredisk CSI spec
+	pvs, err := r.kubeClient.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		klog.Errorf("failed to get PV list: %v", err)
+	}
 
 	for _, pv := range pvs.Items {
 		if pv.Spec.CSI != nil && pv.Spec.CSI.Driver == azureutils.DriverName {
