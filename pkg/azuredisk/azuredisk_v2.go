@@ -43,6 +43,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	azuredisk "sigs.k8s.io/azuredisk-csi-driver/pkg/apis/azuredisk/v1alpha1"
 	azDiskClientSet "sigs.k8s.io/azuredisk-csi-driver/pkg/apis/client/clientset/versioned"
+	"sigs.k8s.io/azuredisk-csi-driver/pkg/azureutils"
 	"sigs.k8s.io/azuredisk-csi-driver/pkg/controller"
 	csicommon "sigs.k8s.io/azuredisk-csi-driver/pkg/csi-common"
 	"sigs.k8s.io/azuredisk-csi-driver/pkg/provisioner"
@@ -319,6 +320,29 @@ func (d *DriverV2) StartControllersAndDieOnExit(ctx context.Context) {
 	// Leader controller manager should recover CRI if possible and clean them up before exiting.
 	go func() {
 		<-mgr.Elected()
+		// add finalizer to controller service account so that the service account doesn't get deleted before controller does
+		for {
+			sa, err := d.kubeClient.CoreV1().ServiceAccounts(azureutils.ReleaseNamespace).Get(ctx, azureutils.ControllerServiceAccountName, metav1.GetOptions{})
+			if err != nil {
+				if errors.IsNotFound(err) {
+					time.Sleep(time.Duration(15) * time.Second)
+				} else {
+					klog.Errorf("failed to get service account (%s) for azuredisk controller", "csi-azuredisk-controller-sa")
+					os.Exit(1)
+				}
+			}
+			updated := sa.DeepCopy()
+			if updated.Finalizers == nil {
+				updated.Finalizers = []string{}
+			}
+			updated.Finalizers = d.addControllerFinalizer(updated.Finalizers, azureutils.ControllerServiceAccountFinalizer)
+			_, err = d.kubeClient.CoreV1().ServiceAccounts(azureutils.ReleaseNamespace).Update(ctx, updated, metav1.UpdateOptions{})
+			if err != nil {
+				klog.Errorf("failed to add finalizer (%s) to service account (%s)", azureutils.ControllerServiceAccountFinalizer, azureutils.ControllerServiceAccountName)
+				os.Exit(1)
+			}
+			break
+		}
 		// recover lost states if necessary
 		klog.Infof("Elected as leader; initiating CRI recovery...")
 		if err := azvReconciler.Recover(ctx); err != nil {
@@ -460,4 +484,24 @@ func (kw klogWriter) Write(p []byte) (n int, err error) {
 
 func (d *DriverV2) getVolumeLocks() *volumehelper.VolumeLocks {
 	return d.volumeLocks
+}
+
+func (d *DriverV2) addControllerFinalizer(finalizers []string, finalizerToAdd string) []string {
+	for _, finalizer := range finalizers {
+		if finalizer == finalizerToAdd {
+			return finalizers
+		}
+	}
+	finalizers = append(finalizers, finalizerToAdd)
+	return finalizers
+}
+
+func (d *DriverV2) removeControllerFinalizer(finalizers []string, finalizerToRemove string) []string {
+	removed := []string{}
+	for _, finalizer := range finalizers {
+		if finalizer != finalizerToRemove {
+			removed = append(removed, finalizer)
+		}
+	}
+	return removed
 }

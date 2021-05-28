@@ -116,6 +116,10 @@ const (
 	PVCNameTag      = "kubernetes.io-created-for-pvc-name"
 	PVCNamespaceTag = "kubernetes.io-created-for-pvc-namespace"
 	PVNameTag       = "kubernetes.io-created-for-pv-name"
+
+	ControllerServiceAccountName      = "csi-azuredisk-controller-sa"
+	ReleaseNamespace                  = "kube-system"
+	ControllerServiceAccountFinalizer = "disk.csi.azure.com/azuredisk-controller"
 )
 
 var (
