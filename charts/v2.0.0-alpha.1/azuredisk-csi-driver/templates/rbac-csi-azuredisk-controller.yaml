@@ -39,6 +39,9 @@ rules:
   - apiGroups: ["disk.csi.azure.com"]
     resources: ["azdrivernodes/status", "azvolumeattachments/status", "azvolumes/status"]
     verbs: ["get", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get", "patch", "update"]
     {{- end }}
 
 ---
