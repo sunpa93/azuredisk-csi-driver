@@ -49,17 +49,12 @@ type ReconcileAzVolume struct {
 	kubeClient       kubeClientSet.Interface
 	namespace        string
 	cloudProvisioner CloudProvisioner
-	isInCleanUp      bool
 }
 
 // Implement reconcile.Reconciler so the controller can reconcile objects
 var _ reconcile.Reconciler = &ReconcileAzVolume{}
 
 func (r *ReconcileAzVolume) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
-	// Don't reconcile when in clean up
-	if r.isInCleanUp {
-		return reconcile.Result{}, nil
-	}
 	azVolume, err := azureutils.GetAzVolume(ctx, r.client, r.azVolumeClient, request.Name, request.Namespace, true)
 
 	if err != nil {
@@ -412,22 +407,6 @@ func (r *ReconcileAzVolume) Recover(ctx context.Context) error {
 	return nil
 }
 
-func (r *ReconcileAzVolume) CleanUp(ctx context.Context) {
-	r.isInCleanUp = true
-	klog.Infof("Starting AzVolume CRI clean-up")
-
-	azVolumes, err := azureutils.ListAzVolumes(ctx, r.client, r.azVolumeClient, r.namespace, false)
-	if err != nil {
-		klog.Warningf("failed to get AzVolume list: %v", err)
-		return
-	}
-	for _, azVolume := range azVolumes.Items {
-		if _, err := r.deleteFinalizer(ctx, azVolume.Name, nil, map[string]bool{azureutils.AzVolumeFinalizer: true, AzVolumeAttachmentFinalizer: true}, false); err != nil {
-			klog.Warningf("failed to remove finalizer from AzVolume (%s): %v", azVolume.Name, err)
-		}
-	}
-}
-
 func NewAzVolumeController(mgr manager.Manager, azVolumeClient *azVolumeClientSet.Interface, kubeClient *kubeClientSet.Interface, namespace string, cloudProvisioner CloudProvisioner) (*ReconcileAzVolume, error) {
 	reconciler := ReconcileAzVolume{
 		client:           mgr.GetClient(),
@@ -435,7 +414,6 @@ func NewAzVolumeController(mgr manager.Manager, azVolumeClient *azVolumeClientSe
 		kubeClient:       *kubeClient,
 		namespace:        namespace,
 		cloudProvisioner: cloudProvisioner,
-		isInCleanUp:      false,
 	}
 	logger := mgr.GetLogger().WithValues("controller", "azvolume")
 

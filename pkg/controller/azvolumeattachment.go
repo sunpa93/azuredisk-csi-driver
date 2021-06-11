@@ -73,7 +73,6 @@ type ReconcileAzVolumeAttachment struct {
 	azVolumeClient azVolumeClientSet.Interface
 	kubeClient     kubeClientSet.Interface
 	namespace      string
-	isInCleanUp    bool
 
 	cloudProvisioner CloudProvisioner
 
@@ -102,10 +101,6 @@ type filteredNode struct {
 var _ reconcile.Reconciler = &ReconcileAzVolumeAttachment{}
 
 func (r *ReconcileAzVolumeAttachment) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
-	// if the controller is in clean up, don't reconcile
-	if r.isInCleanUp {
-		return reconcile.Result{}, nil
-	}
 	return r.handleAzVolumeAttachmentEvent(ctx, request)
 }
 
@@ -856,12 +851,9 @@ func (r *ReconcileAzVolumeAttachment) triggerDetach(ctx context.Context, attachm
 			}
 		}
 
-		// skip replica management during clean up
-		if !r.isInCleanUp {
-			if err := r.manageReplicas(ctx, azVolumeAttachment.Spec.UnderlyingVolume, DetachEvent, azVolumeAttachment.Spec.RequestedRole == v1alpha1.PrimaryRole); err != nil {
-				klog.Errorf("failed to manage replicas for volume (%s): %v", azVolumeAttachment.Spec.UnderlyingVolume, err)
-				return err
-			}
+		if err := r.manageReplicas(ctx, azVolumeAttachment.Spec.UnderlyingVolume, DetachEvent, azVolumeAttachment.Spec.RequestedRole == v1alpha1.PrimaryRole); err != nil {
+			klog.Errorf("failed to manage replicas for volume (%s): %v", azVolumeAttachment.Spec.UnderlyingVolume, err)
+			return err
 		}
 
 		// If above procedures were successful, remove finalizer from the object
@@ -996,39 +988,12 @@ func (r *ReconcileAzVolumeAttachment) Recover(ctx context.Context) error {
 	return nil
 }
 
-func (r *ReconcileAzVolumeAttachment) CleanUp(ctx context.Context) {
-	klog.Infof("Starting AzVolumeAttachment CRI clean up")
-	r.isInCleanUp = true
-	azVolumeAttachments, err := r.azVolumeClient.DiskV1alpha1().AzVolumeAttachments(r.namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		klog.Warningf("failed to get AzVolumeAttachment List: %v", err)
-		return
-	}
-
-	for _, attachment := range azVolumeAttachments.Items {
-		// if primary attachment, only delete the finalizer
-		if attachment.Status.Detail != nil && attachment.Status.Detail.Role == v1alpha1.PrimaryRole {
-			if err = r.deleteFinalizer(ctx, attachment.Name, false); err != nil {
-				klog.Warningf("failed to remove finalizer from Primary AzVolumeAttachment (%s): %v", attachment.Name, err)
-			}
-			// if replica attachment, detach the volume and delete the CRI
-		} else {
-			if err = r.triggerDetach(ctx, attachment.Name, false); err != nil {
-				klog.Warningf("failed to delete AzVolumeAttachment (%s): %v", attachment.Name, err)
-			} else {
-				klog.V(5).Infof("Deleted AzVolumeAttachment (%s)", attachment.Name)
-			}
-		}
-	}
-}
-
 func NewAzVolumeAttachmentController(mgr manager.Manager, azVolumeClient *azVolumeClientSet.Interface, kubeClient *kubeClientSet.Interface, namespace string, cloudProvisioner CloudProvisioner) (*ReconcileAzVolumeAttachment, error) {
 	reconciler := ReconcileAzVolumeAttachment{
 		client:           mgr.GetClient(),
 		azVolumeClient:   *azVolumeClient,
 		kubeClient:       *kubeClient,
 		namespace:        namespace,
-		isInCleanUp:      false,
 		syncMutex:        sync.RWMutex{},
 		mutexMap:         make(map[string]*sync.Mutex),
 		mutexMapMutex:    sync.RWMutex{},

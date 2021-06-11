@@ -21,8 +21,6 @@ package azuredisk
 import (
 	"context"
 	"flag"
-	"fmt"
-	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -66,11 +64,6 @@ const OutputCallDepth = 6
 // DefaultPrefixLength is the length of the log prefix that we have to strip out
 // when logging klogv1 to klogv2
 const DefaultPrefixLength = 30
-
-// CleanUpPort is used by preStop hook, for sending to the running controller a clean up signal
-// before its SIGTERMed
-const cleanUpPort = "8090"
-const cleanUpPath = "/shutdown"
 
 // DriverV2 implements all interfaces of CSI drivers
 type DriverV2 struct {
@@ -306,15 +299,6 @@ func (d *DriverV2) StartControllersAndDieOnExit(ctx context.Context) {
 		klog.Errorf("Failed to initialize VolumeAttachmentController. Error: %v. Exiting application...", err)
 		os.Exit(1)
 	}
-
-	shutdownFunc := func(w http.ResponseWriter, req *http.Request) {
-		klog.Infof("Received clean up signal; initiating CRI clean up.")
-		azvaReconciler.CleanUp(ctx)
-		azvReconciler.CleanUp(ctx)
-		klog.Infof("Finished cleaning up all CRIs for azuredisk driver. Now shutting down the controller manager...")
-		fmt.Fprintf(w, "CRI clean up complete.")
-	}
-
 	// This goroutine is preserved for leader controller manager
 	// Leader controller manager should recover CRI if possible and clean them up before exiting.
 	go func() {
@@ -329,13 +313,6 @@ func (d *DriverV2) StartControllersAndDieOnExit(ctx context.Context) {
 		}
 		if err := vaReconciler.Recover(ctx); err != nil {
 			klog.Warningf("Failed to update AzVolumeAttachments with necessary VolumeAttachments Annotations: %v.", err)
-		}
-
-		// wait for http get request queued by preStop hook lifecycle to clean up CRIs before exiting.
-		http.HandleFunc(cleanUpPath, shutdownFunc)
-		klog.V(2).Infof("Start listening on Port %s for clean up request...", cleanUpPort)
-		if err := http.ListenAndServe(":"+cleanUpPort, nil); err != nil {
-			klog.Errorf("failed to listen for clean up signal on :%s%s", cleanUpPort, cleanUpPath)
 		}
 	}()
 
