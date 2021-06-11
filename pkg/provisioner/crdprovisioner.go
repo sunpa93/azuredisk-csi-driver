@@ -292,7 +292,7 @@ func (c *CrdProvisioner) DeleteVolume(ctx context.Context, volumeID string, secr
 	}
 	updated.Annotations[azureutils.VolumeDeleteRequestAnnotation] = "cloud-delete-volume"
 
-	azVolume, err = azV.Update(ctx, updated, metav1.UpdateOptions{})
+	_, err = azV.Update(ctx, updated, metav1.UpdateOptions{})
 	if err != nil {
 		klog.Infof("failed to update AzVolume (%s) with annotation (%s): %v", volumeName, azureutils.VolumeDeleteRequestAnnotation)
 		return err

@@ -785,7 +785,7 @@ func (r *ReconcileAzVolumeAttachment) triggerAttach(ctx context.Context, attachm
 				return derr
 			}
 
-			azVolumeAttachment, err = r.updateStatusWithError(ctx, azVolumeAttachment.Name, azVolumeAttachment, err)
+			_, err = r.updateStatusWithError(ctx, azVolumeAttachment.Name, azVolumeAttachment, err)
 			return err
 		}
 
@@ -842,7 +842,7 @@ func (r *ReconcileAzVolumeAttachment) triggerDetach(ctx context.Context, attachm
 				if azVolumeAttachment, derr = r.updateState(ctx, attachmentName, azVolumeAttachment, v1alpha1.DetachmentFailed); derr != nil {
 					return derr
 				}
-				azVolumeAttachment, err = r.updateStatusWithError(ctx, azVolumeAttachment.Name, azVolumeAttachment, err)
+				_, err = r.updateStatusWithError(ctx, azVolumeAttachment.Name, azVolumeAttachment, err)
 				return err
 			}
 
