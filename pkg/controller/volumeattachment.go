@@ -16,6 +16,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -23,8 +24,10 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	kubeClientSet "k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/azuredisk-csi-driver/pkg/apis/azuredisk/v1alpha1"
+	azVolumeClientSet "sigs.k8s.io/azuredisk-csi-driver/pkg/apis/client/clientset/versioned"
 	"sigs.k8s.io/azuredisk-csi-driver/pkg/azureutils"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -35,14 +38,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
-type reconcileVolumeAttachment struct {
-	client    client.Client
-	namespace string
+type ReconcileVolumeAttachment struct {
+	client         client.Client
+	azVolumeClient azVolumeClientSet.Interface
+	kubeClient     kubeClientSet.Interface
+	namespace      string
 }
 
-var _ reconcile.Reconciler = &reconcileVolumeAttachment{}
+var _ reconcile.Reconciler = &ReconcileVolumeAttachment{}
 
-func (r *reconcileVolumeAttachment) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
+func (r *ReconcileVolumeAttachment) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
 	var volumeAttachment storagev1.VolumeAttachment
 	if err := r.client.Get(ctx, request.NamespacedName, &volumeAttachment); err != nil {
 		if !errors.IsNotFound(err) {
@@ -68,7 +73,7 @@ func (r *reconcileVolumeAttachment) Reconcile(ctx context.Context, request recon
 	return reconcile.Result{}, nil
 }
 
-func (r *reconcileVolumeAttachment) AnnotateAzVolumeAttachment(ctx context.Context, azVolumeAttachmentName, volumeAttachmentName string, volumeAttachmentExists bool) error {
+func (r *ReconcileVolumeAttachment) AnnotateAzVolumeAttachment(ctx context.Context, azVolumeAttachmentName, volumeAttachmentName string, volumeAttachmentExists bool) error {
 	var azVolumeAttachment v1alpha1.AzVolumeAttachment
 	if err := r.client.Get(ctx, types.NamespacedName{Namespace: r.namespace, Name: azVolumeAttachmentName}, &azVolumeAttachment); err != nil {
 		if !errors.IsNotFound(err) {
@@ -80,25 +85,25 @@ func (r *reconcileVolumeAttachment) AnnotateAzVolumeAttachment(ctx context.Conte
 		return nil
 	}
 
-	updated := azVolumeAttachment.DeepCopy()
-	if updated.Annotations == nil {
-		updated.Annotations = make(map[string]string)
+	patched := azVolumeAttachment.DeepCopy()
+	if patched.Annotations == nil {
+		patched.Annotations = make(map[string]string)
 	}
 
-	_, ok := updated.Annotations[azureutils.VolumeAttachmentExistsAnnotation]
+	_, ok := patched.Annotations[azureutils.VolumeAttachmentExistsAnnotation]
 	if volumeAttachmentExists {
 		if ok {
 			return nil
 		}
-		updated.Annotations[azureutils.VolumeAttachmentExistsAnnotation] = volumeAttachmentName
+		patched.Annotations[azureutils.VolumeAttachmentExistsAnnotation] = volumeAttachmentName
 	} else {
 		if !ok {
 			return nil
 		}
-		delete(updated.Annotations, azureutils.VolumeAttachmentExistsAnnotation)
+		delete(patched.Annotations, azureutils.VolumeAttachmentExistsAnnotation)
 	}
 
-	if err := r.client.Update(ctx, updated, &client.UpdateOptions{}); err != nil {
+	if err := r.client.Patch(ctx, patched, client.MergeFrom(&azVolumeAttachment)); err != nil {
 		klog.Errorf("failed to update AzVolumeAttachment (%s): %v", azVolumeAttachmentName, err)
 		return err
 	}
@@ -106,10 +111,71 @@ func (r *reconcileVolumeAttachment) AnnotateAzVolumeAttachment(ctx context.Conte
 	return nil
 }
 
-func NewVolumeAttachmentController(ctx context.Context, mgr manager.Manager, namespace string) error {
-	reconciler := reconcileVolumeAttachment{
-		client:    mgr.GetClient(),
-		namespace: namespace,
+func (r *ReconcileVolumeAttachment) Recover(ctx context.Context) error {
+	// Get all volumeAttachments
+	volumeAttachments, err := r.kubeClient.StorageV1().VolumeAttachments().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		klog.Warningf("failed to list volume attachments: %v", err)
+		return err
+	}
+
+	// Loop through volumeAttachments and create Primary AzVolumeAttachments in correspondence
+	for _, volumeAttachment := range volumeAttachments.Items {
+		if volumeAttachment.Spec.Attacher == azureutils.DriverName {
+			volumeName := volumeAttachment.Spec.Source.PersistentVolumeName
+			if volumeName == nil {
+				continue
+			}
+			// get PV and retrieve diskName
+			pv, err := r.kubeClient.CoreV1().PersistentVolumes().Get(ctx, *volumeName, metav1.GetOptions{})
+			if err != nil {
+				klog.Errorf("failed to get PV (%s): %v", volumeName, err)
+				return err
+			}
+
+			if pv.Spec.CSI == nil || pv.Spec.CSI.Driver != azureutils.DriverName {
+				continue
+			}
+
+			diskName, err := azureutils.GetDiskNameFromAzureManagedDiskURI(pv.Spec.CSI.VolumeHandle)
+			if err != nil {
+				klog.Warningf("failed to extract disk name from volumehandle (%s): %v", pv.Spec.CSI.VolumeHandle, err)
+				continue
+			}
+			nodeName := volumeAttachment.Spec.NodeName
+			azVolumeAttachmentName := azureutils.GetAzVolumeAttachmentName(diskName, nodeName)
+
+			for i := 0; i < maxRetry; i++ {
+				// check if the CRI exists already
+				azVolumeAttachment, err := azureutils.GetAzVolumeAttachment(ctx, r.client, r.azVolumeClient, azVolumeAttachmentName, r.namespace, false)
+				if err != nil {
+					klog.Warningf("failed to get AzVolumeAttachment (%s): %v", azVolumeAttachmentName, err)
+				}
+
+				updated := azVolumeAttachment.DeepCopy()
+				if updated.Annotations == nil {
+					updated.Annotations = map[string]string{}
+				}
+				updated.Annotations[azureutils.VolumeAttachmentExistsAnnotation] = volumeAttachment.Name
+				_, err = r.azVolumeClient.DiskV1alpha1().AzVolumeAttachments(r.namespace).Update(ctx, updated, metav1.UpdateOptions{})
+				if err != nil {
+					klog.Warningf("failed to update AzVolumeAttachment (%s) with annotation (%s): %v", azVolumeAttachmentName, azureutils.VolumeAttachmentExistsAnnotation, err)
+					time.Sleep(time.Duration(15) * time.Second)
+					continue
+				}
+				break
+			}
+		}
+	}
+	return nil
+}
+
+func NewVolumeAttachmentController(ctx context.Context, mgr manager.Manager, azVolumeClient *azVolumeClientSet.Interface, kubeClient *kubeClientSet.Interface, namespace string) (*ReconcileVolumeAttachment, error) {
+	reconciler := ReconcileVolumeAttachment{
+		client:         mgr.GetClient(),
+		namespace:      namespace,
+		azVolumeClient: *azVolumeClient,
+		kubeClient:     *kubeClient,
 	}
 
 	c, err := controller.New("volumeattachment-controller", mgr, controller.Options{
@@ -120,16 +186,16 @@ func NewVolumeAttachmentController(ctx context.Context, mgr manager.Manager, nam
 
 	if err != nil {
 		klog.Errorf("failed to create a new volumeattachment controller: %v", err)
-		return err
+		return nil, err
 	}
 
 	// Watch for CRUD events on VolumeAttachment objects
 	err = c.Watch(&source.Kind{Type: &storagev1.VolumeAttachment{}}, &handler.EnqueueRequestForObject{})
 	if err != nil {
 		klog.Errorf("failed to initialize watch for volumeattachment object: %v", err)
-		return err
+		return nil, err
 	}
 
 	klog.V(2).Info("VolumeAttachment Controller successfully initialized.")
-	return nil
+	return &reconciler, nil
 }

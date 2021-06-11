@@ -163,15 +163,6 @@ spec:
             initialDelaySeconds: 30
             timeoutSeconds: 10
             periodSeconds: 30
-          lifecycle:
-            preStop:
-              exec:
-                command:
-                  - "sh"
-                  - "-c"
-                  - |
-                    curl http://localhost:8090/shutdown
-                    kubectl patch serviceaccounts csi-azuredisk-controller-sa -n kube-system -p '{"metadata":{"finalizers":[]}}' --type=merge
           env:
             - name: AZURE_CREDENTIAL_FILE
               valueFrom:

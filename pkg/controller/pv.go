@@ -74,10 +74,10 @@ func (r *reconcilePV) Reconcile(ctx context.Context, request reconcile.Request) 
 		return reconcile.Result{}, nil
 	}
 
-	if azVolume.Status != nil {
-		if pv.Status.Phase == corev1.VolumeReleased && azVolume.Status.Phase == v1alpha1.VolumeBound {
+	if azVolume.Status.Detail != nil {
+		if pv.Status.Phase == corev1.VolumeReleased && azVolume.Status.Detail.Phase == v1alpha1.VolumeBound {
 			updated := azVolume.DeepCopy()
-			updated.Status.Phase = v1alpha1.VolumeReleased
+			updated.Status.Detail.Phase = v1alpha1.VolumeReleased
 
 			if err := r.client.Update(ctx, updated, &client.UpdateOptions{}); err != nil {
 				klog.Errorf("failed to update AzVolume (%s): %v", pv.Name, err)

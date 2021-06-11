@@ -30,6 +30,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+const (
+	maxRetry = 10
+)
+
 // TODO Make CloudProvisioner independent of csi types.
 type CloudProvisioner interface {
 	CreateVolume(

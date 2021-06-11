@@ -29,6 +29,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2020-12-01/compute"
 	"github.com/pborman/uuid"
 	v1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -105,6 +106,7 @@ const (
 	// to prevent the pod deletion until clean up is completed
 	ControllerFinalizer              = "disk.csi.azure.com/azuredisk-finalizer"
 	VolumeAttachmentExistsAnnotation = "disk.csi.azure.com/volume-attachment"
+	VolumeDeleteRequestAnnotation    = "disk.csi.azure.com/volume-delete"
 
 	// ZRS specific constants
 	WellKnownTopologyKey = "topology.kubernetes.io/zone"
@@ -118,6 +120,8 @@ const (
 	PVNameTag       = "kubernetes.io-created-for-pv-name"
 
 	ControllerServiceAccountName      = "csi-azuredisk-controller-sa"
+	ControllerClusterRoleName         = "azuredisk-external-provisioner-role"
+	ControllerClusterRoleBindingName  = "azuredisk-csi-provisioner-binding"
 	ReleaseNamespace                  = "kube-system"
 	ControllerServiceAccountFinalizer = "disk.csi.azure.com/azuredisk-controller"
 )
@@ -357,7 +361,7 @@ func GetAzVolumePhase(phase v1.PersistentVolumePhase) v1alpha1.AzVolumePhase {
 	return v1alpha1.AzVolumePhase(phase)
 }
 
-func GetAzVolume(ctx context.Context, client client.Client, azDiskClient azDiskClientSet.Interface, azVolumeName, namespace string, useCache bool) (v1alpha1.AzVolume, error) {
+func GetAzVolume(ctx context.Context, client client.Client, azDiskClient azDiskClientSet.Interface, azVolumeName, namespace string, useCache bool) (*v1alpha1.AzVolume, error) {
 	var azVolume *v1alpha1.AzVolume
 	var err error
 	if useCache {
@@ -366,7 +370,7 @@ func GetAzVolume(ctx context.Context, client client.Client, azDiskClient azDiskC
 	} else {
 		azVolume, err = azDiskClient.DiskV1alpha1().AzVolumes(namespace).Get(ctx, azVolumeName, metav1.GetOptions{})
 	}
-	return *azVolume, err
+	return azVolume, err
 }
 
 func ListAzVolumes(ctx context.Context, client client.Client, azDiskClient azDiskClientSet.Interface, namespace string, useCache bool) (v1alpha1.AzVolumeList, error) {
@@ -381,7 +385,7 @@ func ListAzVolumes(ctx context.Context, client client.Client, azDiskClient azDis
 	return *azVolumeList, err
 }
 
-func GetAzVolumeAttachment(ctx context.Context, client client.Client, azDiskClient azDiskClientSet.Interface, azVolumeAttachmentName, namespace string, useCache bool) (v1alpha1.AzVolumeAttachment, error) {
+func GetAzVolumeAttachment(ctx context.Context, client client.Client, azDiskClient azDiskClientSet.Interface, azVolumeAttachmentName, namespace string, useCache bool) (*v1alpha1.AzVolumeAttachment, error) {
 	var azVolumeAttachment *v1alpha1.AzVolumeAttachment
 	var err error
 	if useCache {
@@ -390,7 +394,7 @@ func GetAzVolumeAttachment(ctx context.Context, client client.Client, azDiskClie
 	} else {
 		azVolumeAttachment, err = azDiskClient.DiskV1alpha1().AzVolumeAttachments(namespace).Get(ctx, azVolumeAttachmentName, metav1.GetOptions{})
 	}
-	return *azVolumeAttachment, err
+	return azVolumeAttachment, err
 }
 
 func ListAzVolumeAttachments(ctx context.Context, client client.Client, azDiskClient azDiskClientSet.Interface, namespace string, useCache bool) (v1alpha1.AzVolumeAttachmentList, error) {
@@ -403,4 +407,16 @@ func ListAzVolumeAttachments(ctx context.Context, client client.Client, azDiskCl
 		azVolumeAttachmentList, err = azDiskClient.DiskV1alpha1().AzVolumeAttachments(namespace).List(ctx, metav1.ListOptions{})
 	}
 	return *azVolumeAttachmentList, err
+}
+
+func GetAzVolumeAttachmentState(volumeAttachmentStatus storagev1.VolumeAttachmentStatus) v1alpha1.AzVolumeAttachmentAttachmentState {
+	if volumeAttachmentStatus.Attached {
+		return v1alpha1.Attached
+	} else if volumeAttachmentStatus.AttachError != nil {
+		return v1alpha1.AttachmentFailed
+	} else if volumeAttachmentStatus.DetachError != nil {
+		return v1alpha1.DetachmentFailed
+	} else {
+		return v1alpha1.AttachmentPending
+	}
 }
