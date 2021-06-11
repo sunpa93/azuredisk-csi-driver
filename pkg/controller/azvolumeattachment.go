@@ -582,41 +582,6 @@ func (r *ReconcileAzVolumeAttachment) getNodesForReplica(ctx context.Context, nu
 	return filteredNodes, nil
 }
 
-// Deprecated
-func (r *ReconcileAzVolumeAttachment) listReplicasByVolume(ctx context.Context, volume string) ([]v1alpha1.AzVolumeAttachment, error) {
-	replicas := []v1alpha1.AzVolumeAttachment{}
-	attachments, err := r.azVolumeClient.DiskV1alpha1().AzVolumeAttachments(r.namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		klog.Errorf("failed to get attachment list for namespace %s: %v", r.namespace, err)
-		return replicas, err
-	}
-	if attachments != nil {
-		for _, attachment := range attachments.Items {
-			if attachment.Spec.UnderlyingVolume == volume && attachment.Spec.RequestedRole == v1alpha1.ReplicaRole {
-				replicas = append(replicas, attachment)
-			}
-		}
-	}
-	return replicas, nil
-}
-
-func (r *ReconcileAzVolumeAttachment) listAzVolumeAttachmentsByNodeName(ctx context.Context, nodeName string) ([]v1alpha1.AzVolumeAttachment, error) {
-	filteredAttachments := []v1alpha1.AzVolumeAttachment{}
-	attachments, err := r.azVolumeClient.DiskV1alpha1().AzVolumeAttachments(r.namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		klog.Errorf("failed to get attachment list for namespace %s: %v", r.namespace, err)
-		return filteredAttachments, err
-	}
-	if attachments != nil {
-		for _, attachment := range attachments.Items {
-			if attachment.Spec.NodeName == nodeName {
-				filteredAttachments = append(filteredAttachments, attachment)
-			}
-		}
-	}
-	return filteredAttachments, nil
-}
-
 func (r *ReconcileAzVolumeAttachment) initializeMeta(ctx context.Context, attachmentName string, azVolumeAttachment *v1alpha1.AzVolumeAttachment, useCache bool) (*v1alpha1.AzVolumeAttachment, error) {
 	var err error
 	if azVolumeAttachment == nil {
