@@ -97,7 +97,7 @@ spec:
                 - role
                 type: object
               error:
-                description: Error occurred during attach/detach of volume
+                description: Error occured during attach/detach of volume
                 properties:
                   currentNode:
                     description: "NodeName is a type that holds a api.Node's Name

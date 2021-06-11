@@ -192,7 +192,7 @@ spec:
                     type: object
                 type: object
               error:
-                description: Error occurred during creation/deletion of volume
+                description: Error occured during creation/deletion of volume
                 properties:
                   currentNode:
                     description: "NodeName is a type that holds a api.Node's Name
