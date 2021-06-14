@@ -102,7 +102,7 @@ type AzVolumeStatus struct {
 	Error *AzError `json:"error,omitempty"`
 }
 
-// AzVolumeStatus is the status for an AzVolume resource
+// AzVolumeStatusDetail is the status of the underlying Volume resource
 type AzVolumeStatusDetail struct {
 	//Current status of the AzVolume
 	//+optional
@@ -214,6 +214,7 @@ type AzVolumeAttachmentStatus struct {
 	Error *AzError `json:"error,omitempty"`
 }
 
+// AzVolumeAttachmentStatusDetail is the status of the attachment between specified node and volume.
 type AzVolumeAttachmentStatusDetail struct {
 	Role Role `json:"role"`
 	//+optional

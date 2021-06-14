@@ -437,7 +437,7 @@ func (c *CrdProvisioner) UnpublishVolume(
 
 	err = azVA.Delete(ctx, attachmentName, metav1.DeleteOptions{})
 	if errors.IsNotFound(err) {
-		klog.Infof("Could not find the volume attachment (%s). Deletion succedded", attachmentName)
+		klog.Infof("Could not find the volume attachment (%s). Deletion succeeded", attachmentName)
 		return nil
 	}
 
