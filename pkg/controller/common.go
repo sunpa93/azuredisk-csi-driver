@@ -322,6 +322,10 @@ func getRankedNodesForReplicaAttachments(ctx context.Context, azr azReconciler, 
 			}
 		}
 	}
+
+	// remove the primary node from the nodeScores map as it can get added if not all volumes have yet been promoted at the time this function is called in case of failover.
+	delete(nodeScores, primaryNode)
+
 	// sorting nodes array per their score in nodeScore array
 	sort.Slice(nodes[:], func(i, j int) bool {
 		return nodeScores[nodes[i]] > nodeScores[nodes[j]]
