@@ -1015,7 +1015,14 @@ func initDiskControllers(az *Cloud) error {
 
 	logger := klogr.NewWithOptions(klogr.WithFormat(klogr.FormatKlog)).WithName("cloud-provider-azure").WithValues("type", "batch")
 
-	processorOptions := []batch.ProcessorOption{
+	attachProcessorOptions := []batch.ProcessorOption{
+		batch.WithVerboseLogLevel(3),
+		batch.WithDelayBeforeStart(1 * time.Second),
+		batch.WithGlobalLimiter(attachDetachRateLimiter),
+	}
+
+	// if you want to configure rate limiter differently detach, you can do it here
+	detachProcessorOptions := []batch.ProcessorOption{
 		batch.WithVerboseLogLevel(3),
 		batch.WithDelayBeforeStart(1 * time.Second),
 		batch.WithGlobalLimiter(attachDetachRateLimiter),
@@ -1042,7 +1049,7 @@ func initDiskControllers(az *Cloud) error {
 		return results, nil
 	}
 
-	attachDiskProcessOptions := append(processorOptions,
+	attachDiskProcessOptions := append(attachProcessorOptions,
 		batch.WithLogger(logger.WithValues("operation", "attach_disk")),
 		batch.WithMetricsRecorder(metrics.NewBatchProcessorMetricsRecorder("batch", "updateasync", "attach_disk")))
 
@@ -1062,7 +1069,7 @@ func initDiskControllers(az *Cloud) error {
 		return make([]interface{}, len(disksToDetach)), nil
 	}
 
-	detachDiskProcessorOptions := append(processorOptions,
+	detachDiskProcessorOptions := append(detachProcessorOptions,
 		batch.WithLogger(logger.WithValues("operation", "detach_disk")),
 		batch.WithMetricsRecorder(metrics.NewBatchProcessorMetricsRecorder("batch", "update", "detach_disk")))
 

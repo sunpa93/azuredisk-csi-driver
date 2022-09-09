@@ -22,8 +22,10 @@ import (
 )
 
 const (
-	defaultAttachDetachDiskQPS    = (240.0 / 180.0)                        // Default compute QPS limit is 240 queries / 3 minutes
-	defaultAttachDetachDiskBucket = int(defaultAttachDetachDiskQPS * 60.0) // Allow for a burst of a minutes worth of quota
+	defaultAttachDetachDiskQPS    = 6.0 // v1 setting
+	defaultAttachDetachDiskBucket = 10  // v1 setting
+	// defaultAttachDetachDiskQPS = (240.0 / 180.0) // Default compute QPS limit is 240 queries / 3 minutes
+	// defaultAttachDetachDiskBucket = int(defaultAttachDetachDiskQPS * 60.0) // Allow for a burst of a minutes worth of quota
 )
 
 // CloudProviderRateLimitConfig indicates the rate limit config for each clients.
